@@ -5,4 +5,4 @@ set -euo pipefail
 # Get current location of build script
 basedir=$( cd "$(dirname "$0")" ; pwd -P )
 
-conda env update -f ${basedir}/environment_complete.yml
+conda env update -f ${basedir}/environment.yml
