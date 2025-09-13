@@ -532,7 +532,6 @@ dependencies:
       - rio-tiler==7.2.2
       - rioxarray==0.19.0
       - setuptools==69.5.1
-      - stac-ipyleaflet==0.3.6
 variables:
   TITILER_STAC_ENDPOINT: https://titiler-pgstac.maap-project.org/
   TITILER_ENDPOINT: https://titiler.maap-project.org/
