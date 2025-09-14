@@ -1,7 +1,7 @@
-algorithm_description: Create a 1ºx1º tile of GEDI data
+algorithm_description: Create a 1x1 tile of GEDI data
 algorithm_name: gedi-tile-writer
-algorithm_version: amelia-deploy-rbGix0PH
-build_command: tiled_gedi/build-env.sh
+algorithm_version: amelia-deploy-wkSd1rTe
+build_command: gedi_tiler/build-env.sh
 disk_space: 5GB
 docker_container_url: mas.maap-project.org/root/maap-workspaces/base_images/vanilla:v3.1.5
 inputs:
@@ -12,7 +12,7 @@ inputs:
     name: schema
     required: true
   positional:
-  - default: 'maap-ops-workspace'
+  - default: maap-ops-workspace
     description: AWS bucket in which the GEDI database is stored (e.g. maap-ops-workspace)
     name: bucket
     required: true
@@ -21,14 +21,14 @@ inputs:
     name: prefix
     required: true
   - default: ''
-    description: Tile ID to process. 1ºx1º degree tiles in the format [N/S][DD][E/W][DDD], defining the coordinates of the top-left corner of the tile.
-    name: tile_id 
+    description: Tile ID to process. 1x1 degree tiles in the format [N/S][DD][E/W][DDD],
+      defining the coordinates of the top-left corner of the tile.
+    name: tile_id
     required: true
   - default: ''
     description: Quick test running over only 2 GEDI granules.
     name: test
     required: false
-
 queue: maap-dps-worker-32gb
 repository_url: https://github.com/ameliaholcomb/gedi_tiler.git
-run_command: gedi_tiler/run_gtiler.sh
+run_command: gedi_tiler/run_dps_tile_builder.sh
