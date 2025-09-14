@@ -57,8 +57,8 @@ def get_covering_tiles_for_region(
     """
     # generate all the tiles in the world
     minx = -180
-    maxx = 180
-    miny = -90
+    maxx = 179
+    miny = -89
     maxy = 90
     tiles = []
     for i in range(minx, maxx):
