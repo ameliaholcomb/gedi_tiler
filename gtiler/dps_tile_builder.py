@@ -103,6 +103,8 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def _get_indices_in_tile(f, beam, columns, tile):
     """Get the range of shot indices for a single beam that lie in the tile."""
+    # TODO: This function could use some tests.
+    # e.g. individual values can be nan, no data, lons/lats not in order
     lat_col = [c for c in columns.values() if "lat_lowestmode" in c.lower()]
     lon_col = [c for c in columns.values() if "lon_lowestmode" in c.lower()]
     lats = f[f"{beam}/{lat_col[0]}"][:]
@@ -138,15 +140,15 @@ def load_granule_product(
             for k in hdf5.keys():
                 if not k.startswith("BEAM"):
                     continue
-                idx_mask = _get_indices_in_tile(hdf5, k, columns, tile)
-                if np.sum(idx_mask) == 0:  # no data in beam
+                idxs = _get_indices_in_tile(hdf5, k, columns, tile)
+                if len(idxs) == 0:  # no tile data in beam
                     continue
                 dfs = {}
                 for j in columns.keys():
                     if "ancillary" in columns[j].lower():
                         anci[j] = hdf5[f"{k}/{columns[j]}"][:][0]
                         continue
-                    d = hdf5[f"{k}/{columns[j]}"][idx_mask]
+                    d = hdf5[f"{k}/{columns[j]}"][idxs]
                     if d.ndim == 2:
                         for col in range(d.shape[-1]):
                             jj = f"{j}_{col:03d}"
@@ -164,6 +166,8 @@ def load_granule_product(
             return load_granule_product(rfs, s3url, columns, tile)
         except Exception as e:
             raise e
+    if len(full_df) == 0:
+        return pd.DataFrame()  # no tile data in granule
     full_df = pd.concat(full_df)
     for j in anci.keys():
         full_df[j] = anci[j]
