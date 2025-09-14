@@ -254,12 +254,16 @@ def run_main(args: argparse.Namespace):
     granules = load_tile_metadata(args.tile_id, con, args.bucket, args.prefix)
     t2 = time.time()
     print(f"Loading metadata took {t2 - t1:.1f} seconds.")
+    if args.test:
+        tot = len(granules)
+        granules = granules.head(2)
+        print(f"Testing mode: using {len(granules)}/{tot} granules.")
 
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
 
     dfs = []
-    for row in granules.iterrows():
+    for row in granules.itertuples():
         print(f"Loading granule {row.granule_key} ...")
         df = load_granule(
             rfs=rfs,
