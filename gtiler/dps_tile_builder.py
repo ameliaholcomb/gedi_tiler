@@ -151,7 +151,7 @@ def load_granule_product(
                     d = hdf5[f"{k}/{columns[j]}"][idxs]
                     if d.ndim == 2:
                         for col in range(d.shape[-1]):
-                            jj = f"{j}_{col:03d}"
+                            jj = f"{j}_{col}"
                             dfs[jj] = d[:, col]
                     else:
                         dfs[j] = d
