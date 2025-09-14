@@ -29,6 +29,10 @@ inputs:
     description: Quick test running over only 2 GEDI granules.
     name: test
     required: false
+  - default: ''
+    description: Quality-filter granules before adding to database
+    name: quality
+    required: false
 queue: maap-dps-worker-32gb
 repository_url: https://github.com/ameliaholcomb/gedi_tiler.git
 run_command: gedi_tiler/run_dps_tile_builder.sh
