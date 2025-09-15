@@ -35,6 +35,11 @@ if [ -n "$4" ]; then
 else
     test=""
 fi
+if [ -n "$5" ]; then
+    quality="--quality"
+else
+    quality=""
+fi
 
 # Call the script using the absolute paths
 # Use the updated environment when calling 'conda run'
@@ -42,4 +47,4 @@ fi
 # Any output written to the stdout and stderr streams will be
 # automatically captured and placed in the output dir
 
-conda run --live-stream --name python python ${basedir}/gtiler/setup_database.py --schema_path input/${schema_path} --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} ${test}
+conda run --live-stream --name python python ${basedir}/gtiler/dps_tile_builder.py --schema_path input/${schema_path} --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} ${test} ${quality}
