@@ -1,16 +1,11 @@
 algorithm_description: Create a 1x1 tile of GEDI data
 algorithm_name: gedi-tile-writer
-algorithm_version: amelia-deploy-wkSd1rTe
+algorithm_version: amelia-deploy-w5eDQwev
 build_command: gedi_tiler/build-env.sh
 disk_space: 5GB
 docker_container_url: mas.maap-project.org/root/maap-workspaces/base_images/vanilla:v3.1.5
 inputs:
   config: []
-  file:
-  - default: ''
-    description: Database schema filepath
-    name: schema
-    required: true
   positional:
   - default: maap-ops-workspace
     description: AWS bucket in which the GEDI database is stored (e.g. maap-ops-workspace)

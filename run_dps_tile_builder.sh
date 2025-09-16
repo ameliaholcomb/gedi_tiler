@@ -20,10 +20,6 @@ mkdir -p output
 # this directory called input.
 INPUT_DIR=input
 
-# Since we only have one input (the schema) we can list it as below
-schema_path=$(ls -A1 input/)
-echo "Schema path: [${schema_path}]"
-
 # Read the positional argument as defined in the algorithm registration here
 bucket=$1
 prefix=$2
@@ -47,4 +43,4 @@ fi
 # Any output written to the stdout and stderr streams will be
 # automatically captured and placed in the output dir
 
-conda run --live-stream --name python python ${basedir}/gtiler/dps_tile_builder.py --schema_path input/${schema_path} --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} ${test} ${quality}
+conda run --live-stream --name python python ${basedir}/gtiler/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} ${test} ${quality}
