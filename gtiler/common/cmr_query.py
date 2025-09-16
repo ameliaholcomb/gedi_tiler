@@ -8,7 +8,7 @@ import requests
 from shapely.geometry import MultiPolygon, Polygon
 from typing import Dict, Optional, Tuple
 
-from constants import GediProduct
+from ..database.schema import GediProduct
 
 
 CMR_URL = "https://cmr.earthdata.nasa.gov/search/"
@@ -259,3 +259,33 @@ def test_get_100_l4a_granules_s3():
         granule_array, columns=["granule_name", "granule_url", "granule_size"]
     )
     return df
+
+
+
+# TODO: Possibly faster metadata query on MAAP --
+    # maap = MAAP()
+    # cmr_host = "cmr.earthdata.nasa.gov"
+
+    # aoi_gdf = cast(gpd.GeoDataFrame, gpd.read_file(aoi))
+    # aoi_geometry = aoi_gdf.union_all()
+    # collection_concept_id = (
+    #     doi
+    #     # Assume `doi` value is actually a collection concept ID, and thus avoid
+    #     # a search for the collection, since all we need is the concept ID.
+    #     if doi.startswith("C")
+    #     # Otherwise, search for collection by DOI so we can get its concept ID.
+    #     else find_gedi_collection(
+    #         maap, dict(cmr_host=cmr_host, doi=doi, cloud_hosted="true")
+    #     )["concept-id"]
+    # )
+    # granules = [
+    #     granule
+    #     for granule in maap.searchGranule(
+    #         cmr_host=cmr_host,
+    #         collection_concept_id=collection_concept_id,
+    #         bounding_box=",".join(fp.map(str)(aoi_gdf.total_bounds)),  # pyright: ignore
+    #         limit=limit,
+    #         **(dict(temporal=temporal) if temporal else {}),
+    #     )
+    #     if granule_intersects(aoi_geometry, granule)
+    # ]
