@@ -301,7 +301,7 @@ def run_main(args: argparse.Namespace):
     batch_size = args.checkpoint_interval
     for i in range(0, len(granules), batch_size):
         batch = granules[i : i + batch_size]
-        for i, row in enumerate(batch.itertuples()):
+        for row in batch.itertuples():
             print(f"Loading granule {row.granule_key} ...")
             df = load_granule(
                 rfs=rfs,
