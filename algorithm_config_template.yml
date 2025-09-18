@@ -1,6 +1,6 @@
 algorithm_description: Create a 1x1 tile of GEDI data
 algorithm_name: gedi-tile-writer
-algorithm_version: amelia-deploy-HSmHf5Wt
+algorithm_version: amelia-deploy-q7Bh7okB
 build_command: gedi_tiler/build-env.sh
 disk_space: 5GB
 docker_container_url: mas.maap-project.org/root/maap-workspaces/base_images/vanilla:v3.1.5
@@ -20,7 +20,7 @@ inputs:
       defining the coordinates of the top-left corner of the tile.
     name: tile_id
     required: true
-  - default: 30
+  - default: '30'
     description: Number of granules to process between writing checkpoints.
     name: checkpoint_interval
     required: true
