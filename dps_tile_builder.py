@@ -1,17 +1,19 @@
 import argparse
+import boto3
 import h5py
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
+import pickle
+from typing import List, Tuple
 
 import time
 
-from common import schema_parser
-from database import ducky
-from database.tiles import Tile
-from common import s3_utils
-from constants import GediProduct
+from gtiler.database import ducky
+from gtiler.database.tiles import Tile
+from gtiler.common import s3_utils
+from gtiler.database.schema import SCHEMA
+from gtiler.database.schema import Product, GeometryColumn  # typing only
 
 
 QDEGRADE = [0, 3, 8, 10, 13, 18, 20, 23, 28, 30, 33, 38, 40, 43, 48, 60, 63, 68]
@@ -20,14 +22,6 @@ QDEGRADE = [0, 3, 8, 10, 13, 18, 20, 23, 28, 30, 33, 38, 40, 43, 48, 60, 63, 68]
 def get_cmd_args():
     p = argparse.ArgumentParser(
         description="Generate hierarchical H3 database for fast spatial querying."
-    )
-    p.add_argument(
-        "-s",
-        "--schema_path",
-        dest="schema_path",
-        type=str,
-        required=True,
-        help="Location of a file containing the database schema",
     )
     p.add_argument(
         "-b",
@@ -61,11 +55,12 @@ def get_cmd_args():
         ),
     )
     p.add_argument(
-        "-c",
-        "--check",
-        dest="check",
-        action="store_true",
-        help="Only check for updates without writing any files.",
+        "-i",
+        "--checkpoint_interval",
+        dest="checkpoint_interval",
+        type=int,
+        default=30,
+        help="Number of granules to process between writing checkpoints.",
     )
     p.add_argument(
         "-test",
@@ -88,7 +83,6 @@ def get_cmd_args():
 def check_args(args: argparse.Namespace) -> argparse.Namespace:
     """Check the command line arguments and return the updated args."""
 
-    args.schema = schema_parser.check_schema(args.schema_path)
     args.prefix = args.prefix.strip("/").rstrip("/")
 
     # Check for a valid TileID
@@ -101,14 +95,12 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
-def _get_indices_in_tile(f, beam, columns, tile):
+def _get_indices_in_tile(f, beam, geometry: GeometryColumn, tile):
     """Get the range of shot indices for a single beam that lie in the tile."""
     # TODO: This function could use some tests.
     # e.g. individual values can be nan, no data, lons/lats not in order
-    lat_col = [c for c in columns.values() if "lat_lowestmode" in c.lower()]
-    lon_col = [c for c in columns.values() if "lon_lowestmode" in c.lower()]
-    lats = f[f"{beam}/{lat_col[0]}"][:]
-    lons = f[f"{beam}/{lon_col[0]}"][:]
+    lats = f[f"{beam}/{geometry.lat.SDS_Name}"][:]
+    lons = f[f"{beam}/{geometry.lon.SDS_Name}"][:]
     return np.where(
         (lons >= tile.minx)
         & (lons < tile.maxx)
@@ -120,8 +112,9 @@ def _get_indices_in_tile(f, beam, columns, tile):
 def load_granule_product(
     rfs: s3_utils.RefreshableFSSpec,
     s3url: str,
-    columns: Dict[str, str],
+    product: Product,
     tile: Tile,
+    retry_count: int = 1,
 ) -> pd.DataFrame:
     """Load a GEDI HDF5 file and return a flattened dataframe.
     Args:
@@ -134,38 +127,39 @@ def load_granule_product(
             e.g. {"lat_lowestmode": "geolocation/lat_lowestmode"}
     """
     anci = {}
+    extra = [product.primary_key, product.geometry.lat, product.geometry.lon]
     try:
         with rfs.get_fs().open(s3url, mode="rb") as f, h5py.File(f) as hdf5:
             full_df = []
             for k in hdf5.keys():
                 if not k.startswith("BEAM"):
                     continue
-                idxs = _get_indices_in_tile(hdf5, k, columns, tile)
+                idxs = _get_indices_in_tile(hdf5, k, product.geometry, tile)
                 if len(idxs) == 0:  # no tile data in beam
                     continue
                 dfs = {}
-                for j in columns.keys():
-                    if "ancillary" in columns[j].lower():
-                        anci[j] = hdf5[f"{k}/{columns[j]}"][:][0]
+                for v in product.variables + extra:
+                    if "ancillary" in v.SDS_Name.lower():
+                        anci[v.variable] = hdf5[f"{k}/{v.SDS_Name}"][:][0]
                         continue
-                    d = hdf5[f"{k}/{columns[j]}"][idxs]
+                    d = hdf5[f"{k}/{v.SDS_Name}"][idxs]
                     if d.ndim == 2:
+                        # unroll profile data into separate columns
                         for col in range(d.shape[-1]):
-                            jj = f"{j}_{col}"
-                            dfs[jj] = d[:, col]
+                            vv = f"{v.variable}_{col}"
+                            dfs[vv] = d[:, col]
                     else:
-                        dfs[j] = d
+                        dfs[v.variable] = d
                 dfs = pd.DataFrame(dfs)
                 dfs["beam_name"] = k
                 full_df.append(dfs)
-    except Exception:
-        try:
-            # Try again with new credentials, but if that doesn't work, fail.
-            print("Refreshing S3 credentials and retrying...")
-            rfs.refresh()
-            return load_granule_product(rfs, s3url, columns, tile)
-        except Exception as e:
+    except Exception as e:
+        if retry_count <= 0:
             raise e
+        # Try again with new credentials, but if that doesn't work, fail.
+        print("Refreshing S3 credentials and retrying...")
+        rfs.refresh()
+        return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
     if len(full_df) == 0:
         return pd.DataFrame()  # no tile data in granule
     full_df = pd.concat(full_df)
@@ -178,8 +172,7 @@ def load_granule_product(
 def load_granule(
     rfs: s3_utils.RefreshableFSSpec,
     granule: str,
-    product_files: List[Tuple[str, str]],
-    schema,
+    product_files: List[Tuple[Product, str]],
     tile: Tile,
     qf: bool = True,
 ) -> gpd.GeoDataFrame:
@@ -187,17 +180,13 @@ def load_granule(
     Args:
         granule: Granule name (e.g. OrbitID_GranuleID)
         product_files: List of tuples of the form (product, s3url)
-            e.g. [("l4a", "s3://..."), ("l2b", "s3://...")]
+            e.g. [("level4A", "s3://..."), ("level2B", "s3://...")]
         schema: Dictionary defining the data schema for each product.
     """
     dfs = []
-    for product, s3url in product_files:
-        print("Reading product", product, "from", s3url)
-        columns = {
-            name: schema[product]["variables"][name]["SDS_Name"]
-            for name in schema[product]["variables"].keys()
-        }
-        df = load_granule_product(rfs, s3url, columns, tile)
+    for product_schema, s3url in product_files:
+        print("Reading product", product_schema.product_level, "from", s3url)
+        df = load_granule_product(rfs, s3url, product_schema, tile)
         dfs.append(df)
     full_df = dfs[0]
     for df in dfs[1:]:
@@ -229,24 +218,66 @@ def load_granule(
     return full_df
 
 
-def load_tile_metadata(tile_id: str, con, bucket: str, prefix: str):
+def get_checkpoint_key(prefix, tile_id):
+    return f"{prefix}/checkpoints/{tile_id}/checkpoint.pkl"
+
+
+def read_checkpoint(bucket, prefix, tile_id):
+    checkpoint_key = get_checkpoint_key(prefix, tile_id)
+    s3_resource = boto3.resource("s3")
+    obj = s3_resource.Object(bucket, checkpoint_key)
+    with obj.get()["Body"] as body:
+        return pickle.load(body)
+
+
+def write_checkpoint(
+    remaining_granules, processed_data, bucket, prefix, tile_id
+):
+    print(f"Writing checkpoint: {len(remaining_granules)} granules left ...")
+    with open("checkpoint.pkl", "wb") as f:
+        pickle.dump(
+            (remaining_granules, processed_data),
+            f,
+        )
+    key = get_checkpoint_key(prefix, tile_id)
+    s3_resource = boto3.resource("s3")
+    s3_resource.Object(bucket, key).put(Body=open("checkpoint.pkl", "rb"))
+    return
+
+
+def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
     """Load metadata for a specific tile from S3.
     Args:
         tile_id: Tile ID to load (e.g. N00W000)
-        con: DuckDB connection
         bucket: S3 bucket where the metadata is stored.
         prefix: S3 prefix (folder) where the metadata is stored.
     Returns:
         GeoDataFrame with the metadata for the specified tile.
     """
     md_spec = ducky.metadata_spec(bucket, prefix, tile_id)
-    md = con.sql(f"""
-        SELECT * REPLACE ST_AsText(geometry) AS geometry 
-        FROM read_parquet('{md_spec}')
-    """).df()
-    return gpd.GeoDataFrame(
-        md, geometry=gpd.GeoSeries.from_wkt(md["geometry"]), crs="EPSG:4326"
-    )
+    md_spec = md_spec.replace("*", "data_0")
+    return gpd.read_file(md_spec)
+
+
+def load_work_plan(tile_id: str, bucket: str, prefix: str, test: bool = False):
+    """Get the work plan for this task from metadata and checkpoints."""
+    checkpoint_url = f"s3://{bucket}/{get_checkpoint_key(prefix, tile_id)}"
+    if s3_utils.s3_prefix_exists(checkpoint_url):
+        print("Restoring from checkpoint ...")
+        granules_to_process, processed_data = read_checkpoint(
+            bucket, prefix, tile_id
+        )
+    else:
+        print("Loading new work plan from metadata ...")
+        granules_to_process = load_tile_metadata(tile_id, bucket, prefix)
+        processed_data = pd.DataFrame()
+
+    if test:
+        tot = len(granules_to_process)
+        granules_to_process = granules_to_process.head(2)
+        print(f"Testing mode: using {len(granules_to_process)}/{tot} granules.")
+
+    return granules_to_process, processed_data
 
 
 def run_main(args: argparse.Namespace):
@@ -254,41 +285,51 @@ def run_main(args: argparse.Namespace):
     t1 = time.time()
 
     # Load metadata for the tile
-    con = ducky.init_duckdb()
-    granules = load_tile_metadata(args.tile_id, con, args.bucket, args.prefix)
+    print("Reading metadata and checkpoints for tile ...")
+    granules, processed_data = load_work_plan(
+        args.tile_id, args.bucket, args.prefix, args.test
+    )
     t2 = time.time()
-    print(f"Loading metadata took {t2 - t1:.1f} seconds.")
-    if args.test:
-        tot = len(granules)
-        granules = granules.head(2)
-        print(f"Testing mode: using {len(granules)}/{tot} granules.")
+    print(f"{len(processed_data)} shots already processed.")
+    print(f"Planning to process {len(granules)} new granules.")
+    print(f"Loading metadata and checkpoints took {t2 - t1:.1f} seconds.")
 
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
 
-    dfs = []
-    for row in granules.itertuples():
-        print(f"Loading granule {row.granule_key} ...")
-        df = load_granule(
-            rfs=rfs,
-            granule=row.granule_key,
-            product_files=[
-                (GediProduct.L2A.value, row.level2A_url),
-                (GediProduct.L2B.value, row.level2B_url),
-                (GediProduct.L4A.value, row.level4A_url),
-                (GediProduct.L4C.value, row.level4C_url),
-            ],
-            schema=args.schema,
-            tile=args.tile,
-            qf=args.quality,
+    dfs = [processed_data]
+    batch_size = args.checkpoint_interval
+    for i in range(0, len(granules), batch_size):
+        batch = granules[i : i + batch_size]
+        for row in batch.itertuples():
+            print(f"Loading granule {row.granule_key} ...")
+            df = load_granule(
+                rfs=rfs,
+                granule=row.granule_key,
+                product_files=[
+                    (SCHEMA.products[0], row.level2A_url),
+                    (SCHEMA.products[1], row.level2B_url),
+                    (SCHEMA.products[2], row.level4A_url),
+                    (SCHEMA.products[3], row.level4C_url),
+                ],
+                tile=args.tile,
+                qf=args.quality,
+            )
+            print(f"Loaded {len(df)} shots from granule {row.granule_key}.")
+            dfs.append(df)
+        write_checkpoint(
+            remaining_granules=granules.iloc[i + batch_size :],
+            processed_data=pd.concat(dfs),
+            bucket=args.bucket,
+            prefix=args.prefix,
+            tile_id=args.tile_id,
         )
-        print(f"Loaded {len(df)} shots from granule {row.granule_key}.")
-        dfs.append(df)
     full_df = pd.concat(dfs)
     full_df["tile_id"] = args.tile_id
     t3 = time.time()
     print(f"Loading granules took {t3 - t2:.1f} seconds.")
 
+    con = ducky.init_duckdb()
     aws_prefix = ducky.data_prefix(args.bucket, args.prefix)
     df = con.sql("""
         SELECT *,

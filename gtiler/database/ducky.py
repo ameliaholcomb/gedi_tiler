@@ -2,6 +2,8 @@ import duckdb
 import geopandas as gpd
 import warnings
 
+from . import tiles
+
 TILE_ID = "tile_id"
 YEAR = "year"
 
@@ -42,6 +44,15 @@ def metadata_spec(bucket, prefix, tile=None):
     if tile is not None:
         tile_part = f"{TILE_ID}={tile}"
     return f"s3://{bucket}/{prefix}/metadata/{tile_part}/*.parquet"
+
+
+def spatial_filter_clause(gdf: gpd.GeoDataFrame) -> str:
+    """Create a filter clause to help DuckDB look at only relevant tiles."""
+    covering_tiles, _ = tiles.get_covering_tiles_for_region(gdf)
+    clause = " OR ".join(
+        [f"tile_id = '{t}'" for t in covering_tiles.tile_id.values]
+    )
+    return f"({clause})"
 
 
 def gdf_to_duck(con, gdf: gpd.GeoDataFrame, table_name: str):
