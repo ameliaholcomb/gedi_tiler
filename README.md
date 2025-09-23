@@ -8,12 +8,6 @@ conda env update -f environment.yml
 ```
 Then you're ready check out the examples and tutorial in `tiling_demo.ipynb`!
 
-Please do not modify the demo database
-(`s3://maap-ops-workspace/shared/ameliah/gedi-test/brazil_tiled/`).
-For example, do not
-- manually modify the files in this location, including writing new files to these folders
-- use SQL "INSERT" or "UPDATE" statements with DuckDB
-
 ## Creating a tiled database
 To create a new tiled database using DPS, run
 ```bash
