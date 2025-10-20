@@ -72,10 +72,6 @@ def main(args):
     # and updates S3://<db>/metadata/ with any tiles not already present in S3://<db>/metadata/.
     # It then submits a job for each tile in the region that does not already exist in S3://<db>/data/.
 
-    bad = []  # something is wrong with this tile, come back to it later
-    # bad = bad + ["S04_W060", "N00_W052", "S03_W046", "S13_W049"] # running now
-    bad = bad + ["S22_W050", "N00_W052", "S11_W060", "S21_W051", "S07_W061"]
-
     # 1. Get required tiles for region
     covering_tiles, covering = tiles.get_covering_tiles_for_region(args.shape)
     products = [
@@ -95,9 +91,6 @@ def main(args):
     tile_granule_gdf.drop(columns=["index_right"], inplace=True)
     tile_granule_gdf["cmr_access_time"] = pd.Timestamp.now(tz="UTC")
     required_tiles = set(tile_granule_gdf.tile_id.unique())
-    if len(bad) > 0:
-        print(f"Omitting {len(bad)} bad tiles: {bad}")
-        required_tiles = required_tiles - set(bad)
 
     # 2. Get existing metadata tiles in S3
     con = ducky.init_duckdb()
@@ -155,6 +148,7 @@ def main(args):
     if args.dry_run:
         return
 
+    input("To proceed, press ENTER >>>")
     # 3. Create new metadata dataframe for tiles in region and write to S3
     # the metadata that we expect to describe the database after all jobs complete
     if len(tile_granule_gdf) > 0:
@@ -165,9 +159,14 @@ def main(args):
             COPY tile_granule_gdf TO '{md_prefix}' (
                 FORMAT parquet,
                 PARTITION_BY ({ducky.TILE_ID}),
-                COMPRESSION zstd
+                COMPRESSION zstd,
+                OVERWRITE_OR_IGNORE
             );
         """)
+
+    with open(f"logs/tile_plan_{args.job_code}.txt", "w") as f:
+        for tile_id in sorted(missing_tiles):
+            f.write(f"{tile_id}\n")
 
     # 4. Submit jobs for tiles in required_tiles but not in existing_tiles
     maap = MAAP()
@@ -180,11 +179,12 @@ def main(args):
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
-                version="amelia-deploy-QqTqLdAA",
+                version="amelia-deploy-fskBFkTO",
                 queue="maap-dps-worker-8gb",
                 bucket=args.bucket,
                 prefix=args.prefix,
                 tile_id=tile_id,
+                checkpoint_interval=25,
                 quality="quality",
             )
         time.sleep(5 * 60)
