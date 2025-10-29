@@ -1,6 +1,6 @@
 # Alternative to ducky.py for R users
 library("duckdb")
-devtools::install_github("cboettig/duckdbfs")
+devtools::install_github("cboettig/duckdbfs@26bc6f52a86b7b7f06200e6c2b21f1cdfeb280d1")
 library("duckdbfs")
 library("sf")
 
