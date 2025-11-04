@@ -1,4 +1,5 @@
 import argparse
+import datetime as dt
 import geopandas as gpd
 import hashlib
 from maap.maap import MAAP
@@ -23,12 +24,23 @@ def _hash_string_list(string_list: list) -> str:
 
 
 def _get_granule_metadata(
-    shape: gpd.GeoSeries, products: List[GediProduct]
+    shape: gpd.GeoSeries,
+    products: List[GediProduct],
+    start_year: int,
+    end_year: int,
 ) -> gpd.GeoDataFrame:
     md_list = []
     for product in products:
         print("Querying NASA metadata API for product: ", product.value)
-        df = cmr_query.query(product, spatial=shape, use_cloud=True)
+        date_range = None
+        if start_year is not None and end_year is not None:
+            date_range = (
+                dt.datetime(start_year, 1, 1),
+                dt.datetime(end_year, 12, 31, 23, 59, 59),
+            )
+        df = cmr_query.query(
+            product, spatial=shape, date_range=date_range, use_cloud=True
+        )
         df["granule_key"] = df.granule_name.map(_get_granule_key_for_filename)
         df["product"] = product.value
         df.rename(columns={"granule_url": f"{product.value}_url"}, inplace=True)
@@ -82,7 +94,10 @@ def main(args):
     ]
     # Get CMR metadata for all granules covering the region
     cmr_md = _get_granule_metadata(
-        shape_parser.check_and_format_shape(covering), products
+        shape_parser.check_and_format_shape(covering),
+        products,
+        start_year=args.start_year,
+        end_year=args.end_year,
     )
     # Join to find which granules are needed for each tile
     tile_granule_gdf = covering_tiles.sjoin(
@@ -140,18 +155,18 @@ def main(args):
     print(f"{len(required_tiles)} tiles in the region.")
     print(f"{len(relevant_md_tiles)} metadata tiles in the database for this region.")
     print(f"{len(relevant_data_tiles)} tiles already exist in the database for this region.")
-    print(f"Adding metadata for {len(required_tiles) - len(relevant_md_tiles)} new tiles.")
+    print(f"Planning to add metadata for {len(required_tiles) - len(relevant_md_tiles)} new tiles.")
     print(f"(Which should match this number: {tile_granule_gdf.tile_id.nunique()})")
-    print(f"Creating jobs to process data for {len(missing_tiles)} tiles.")
+    print(f"Planning to create jobs to process data for {len(missing_tiles)} tiles.")
     # fmt: on
 
     if args.dry_run:
         return
 
-    input("To proceed, press ENTER >>>")
     # 3. Create new metadata dataframe for tiles in region and write to S3
     # the metadata that we expect to describe the database after all jobs complete
     if len(tile_granule_gdf) > 0:
+        input("To proceed to create tile metadata, press ENTER >>>")
         print("Writing metadata for required tiles to S3...")
         ducky.gdf_to_duck(con, tile_granule_gdf, "tile_granule_gdf")
         md_prefix = ducky.metadata_prefix(args.bucket, args.prefix)
@@ -164,9 +179,13 @@ def main(args):
             );
         """)
 
-    with open(f"logs/tile_plan_{args.job_code}.txt", "w") as f:
-        for tile_id in sorted(missing_tiles):
-            f.write(f"{tile_id}\n")
+        logfile = f"logs/tile_plan_{args.job_code}.txt"
+        with open(logfile, "w") as f:
+            for tile_id in sorted(missing_tiles):
+                f.write(f"{tile_id}\n")
+        print(f"Proposed metadata for tiles listed in {logfile} written to database.")
+
+    input("To proceed to create jobs, press ENTER >>>""")
 
     # 4. Submit jobs for tiles in required_tiles but not in existing_tiles
     maap = MAAP()
@@ -218,6 +237,17 @@ if __name__ == "__main__":
         required=True,
         help="S3 prefix for tiled GEDI database.",
     )
+    parser.add_argument(
+        "--start_year",
+        type=int,
+        help="Start year for data to include (inclusive).",
+    )
+    parser.add_argument(
+        "--end_year",
+        type=int,
+        help="End year for data to include (inclusive).",
+    )
+
     parser.add_argument(
         "--dry_run",
         action="store_true",

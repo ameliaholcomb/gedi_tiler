@@ -71,7 +71,9 @@ def get_covering_tiles_for_region(
         crs="EPSG:4326",
     )
 
-    covering_tiles = tile_df.sjoin(shape, how="inner", predicate="intersects")
+    covering_tiles = tile_df.sjoin(
+        shape, how="inner", predicate="intersects"
+    ).drop_duplicates(subset=["tile_id", "geometry"])
     covering_tiles = covering_tiles[["tile_id", "geometry"]]
     covering = gpd.GeoSeries(covering_tiles.union_all(), crs="EPSG:4326")
     return covering_tiles.reset_index(drop=True), covering
