@@ -6,9 +6,10 @@ from maap.maap import MAAP
 import pandas as pd
 import time
 
-from typing import List
+from typing import List, Optional
 
 from gtiler.common import shape_parser, granule_name, cmr_query, s3_utils
+from gtiler.common.jobs_manager import JobsManager
 from gtiler.database import ducky, tiles
 from gtiler.database.schema import GediProduct
 
@@ -26,12 +27,12 @@ def _hash_string_list(string_list: list) -> str:
 def _get_granule_metadata(
     shape: gpd.GeoSeries,
     products: List[GediProduct],
-    start_year: int,
-    end_year: int,
+    start_year: Optional[int] = None,
+    end_year: Optional[int] = None,
 ) -> gpd.GeoDataFrame:
     md_list = []
     for product in products:
-        print("Querying NASA metadata API for product: ", product.value)
+        print("\tQuerying NASA metadata API for product: ", product.value)
         date_range = None
         if start_year is not None and end_year is not None:
             date_range = (
@@ -44,6 +45,7 @@ def _get_granule_metadata(
         df["granule_key"] = df.granule_name.map(_get_granule_key_for_filename)
         df["product"] = product.value
         df.rename(columns={"granule_url": f"{product.value}_url"}, inplace=True)
+        print(f"\tFound {len(df)} granules for product {product.value}.")
         md_list.append(df)
     md = gpd.GeoDataFrame(
         pd.concat(md_list), geometry="granule_poly"
@@ -52,6 +54,9 @@ def _get_granule_metadata(
     # Filter out granules with that do not have each required product.
     nprod = md.groupby("granule_key")["product"].nunique()
     omit = nprod[nprod != len(products)].index
+    print(
+        f"Excluding {len(omit)}/{len(nprod)} granules with incomplete product sets."
+    )
     md = md[~md.granule_key.isin(omit)].reset_index(drop=True)
     md.drop(columns=["product"], inplace=True)
     md = md.groupby(["granule_key"]).agg(
@@ -85,6 +90,7 @@ def main(args):
     # It then submits a job for each tile in the region that does not already exist in S3://<db>/data/.
 
     # 1. Get required tiles for region
+    print("Determining required tiles for region...")
     covering_tiles, covering = tiles.get_covering_tiles_for_region(args.shape)
     products = [
         GediProduct.L2A,
@@ -99,6 +105,8 @@ def main(args):
         start_year=args.start_year,
         end_year=args.end_year,
     )
+    # Save the geometry column so that it will not be dropped in the sjoin
+    cmr_md["granule_geometry"] = cmr_md.geometry
     # Join to find which granules are needed for each tile
     tile_granule_gdf = covering_tiles.sjoin(
         cmr_md, how="inner", predicate="intersects"
@@ -152,12 +160,12 @@ def main(args):
     relevant_md_tiles = {x for x in existing_md if x in required_tiles}
     relevant_data_tiles = {x for x in existing_tiles if x in required_tiles}
     # fmt: off
-    print(f"{len(required_tiles)} tiles in the region.")
-    print(f"{len(relevant_md_tiles)} metadata tiles in the database for this region.")
-    print(f"{len(relevant_data_tiles)} tiles already exist in the database for this region.")
-    print(f"Planning to add metadata for {len(required_tiles) - len(relevant_md_tiles)} new tiles.")
-    print(f"(Which should match this number: {tile_granule_gdf.tile_id.nunique()})")
-    print(f"Planning to create jobs to process data for {len(missing_tiles)} tiles.")
+    print(f"\t{len(required_tiles)} tiles in the region.")
+    print(f"\t{len(relevant_md_tiles)} metadata tiles in the database for this region.")
+    print(f"\t{len(relevant_data_tiles)} tiles already exist in the database for this region.")
+    print(f"\tPlanning to add metadata for {len(required_tiles) - len(relevant_md_tiles)} new tiles.")
+    print(f"\t(Which should match this number: {tile_granule_gdf.tile_id.nunique()})")
+    print(f"\tPlanning to create jobs to process data for {len(missing_tiles)} tiles.")
     # fmt: on
 
     if args.dry_run:
@@ -168,7 +176,13 @@ def main(args):
     if len(tile_granule_gdf) > 0:
         input("To proceed to create tile metadata, press ENTER >>>")
         print("Writing metadata for required tiles to S3...")
-        ducky.gdf_to_duck(con, tile_granule_gdf, "tile_granule_gdf")
+
+        ducky.gdf_to_duck(
+            con,
+            tile_granule_gdf,
+            "tile_granule_gdf",
+            geometry_columns=["geometry", "granule_geometry"],
+        )
         md_prefix = ducky.metadata_prefix(args.bucket, args.prefix)
         con.sql(f"""
             COPY tile_granule_gdf TO '{md_prefix}' (
@@ -183,30 +197,20 @@ def main(args):
         with open(logfile, "w") as f:
             for tile_id in sorted(missing_tiles):
                 f.write(f"{tile_id}\n")
-        print(f"Proposed metadata for tiles listed in {logfile} written to database.")
+        print(
+            f"Proposed metadata for tiles listed in {logfile} written to database."
+        )
 
-    input("To proceed to create jobs, press ENTER >>>""")
+    input("To proceed to create jobs, press ENTER >>>")
 
     # 4. Submit jobs for tiles in required_tiles but not in existing_tiles
-    maap = MAAP()
-    # issue in batches of 50 every 5 minutes.
-    for i in range(0, len(missing_tiles), 50):
-        batch = missing_tiles[i : i + 50]
-        for tile_id in batch:
-            print(f"Submitting job for tile {tile_id}...")
-            job_name = f"tiler_{args.job_code}_{tile_id}"
-            job = maap.submitJob(
-                identifier=job_name,
-                algo_id="gedi-tile-writer",
-                version="amelia-deploy-fskBFkTO",
-                queue="maap-dps-worker-8gb",
-                bucket=args.bucket,
-                prefix=args.prefix,
-                tile_id=tile_id,
-                checkpoint_interval=25,
-                quality="quality",
-            )
-        time.sleep(5 * 60)
+    jobs_manager = JobsManager(
+        job_code=args.job_code,
+        algorithm_id="gedi-tile-writer",
+        algorithm_version="amelia-deploy-fskBFkTO",
+        tile_ids=missing_tiles,
+    )
+    jobs_manager.manage()
 
 
 if __name__ == "__main__":
