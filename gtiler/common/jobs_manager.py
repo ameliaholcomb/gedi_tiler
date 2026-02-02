@@ -3,6 +3,7 @@ import enum
 import pandas as pd
 import time
 from tqdm import tqdm
+import requests
 
 
 class JobStatus(enum.Enum):
@@ -51,17 +52,22 @@ class JobsManager:
     def __init__(
         self,
         job_code: str,
+        s3_bucket: str,
+        s3_prefix: str,
         algorithm_id: str,
         algorithm_version: str,
         tile_ids: list[str],
     ):
         self.maap = MAAP(maap_host="api.maap-project.org")
         self.jobs_prefix = f"tiler_{job_code}"
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix
         self.algorithm_id = algorithm_id
         self.algorithm_version = algorithm_version
         self.tiles = set(tile_ids)
 
     def manage(self):
+        tqdm.write("Checking for existing and completed jobs ...")
         succeeded_jobs = self._fetch_jobs(JobStatus.SUCCEEDED)
         tqdm.write(f"Completion: {len(succeeded_jobs)}/{len(self.tiles)}")
 
@@ -121,7 +127,9 @@ class JobsManager:
         offset = 0
         all_jobs = []
         while True:
-            jobs = self.maap.listJobs(offset=offset, **kwargs).json()
+            ret = self.maap.listJobs(offset=offset, **kwargs)
+            ret.raise_for_status()
+            jobs = ret.json()
             if not jobs.get("jobs"):
                 return all_jobs
             jobs_list = jobs["jobs"]
