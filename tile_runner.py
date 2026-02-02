@@ -100,7 +100,11 @@ def main(args):
     ]
     # Get CMR metadata for all granules covering the region
     cmr_md = _get_granule_metadata(
-        shape_parser.check_and_format_shape(covering),
+        shape_parser.check_and_format_shape(
+            gpd.GeoDataFrame(geometry=covering),
+            exterior_cw=False,
+            simplify=True,
+        ),
         products,
         start_year=args.start_year,
         end_year=args.end_year,
@@ -206,6 +210,8 @@ def main(args):
     # 4. Submit jobs for tiles in required_tiles but not in existing_tiles
     jobs_manager = JobsManager(
         job_code=args.job_code,
+        s3_bucket=args.bucket,
+        s3_prefix=args.prefix,
         algorithm_id="gedi-tile-writer",
         algorithm_version="amelia-deploy-fskBFkTO",
         tile_ids=missing_tiles,
