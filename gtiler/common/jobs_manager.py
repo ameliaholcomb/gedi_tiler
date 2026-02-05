@@ -52,6 +52,7 @@ class JobsManager:
     def __init__(
         self,
         job_code: str,
+        job_iteration: int,
         s3_bucket: str,
         s3_prefix: str,
         algorithm_id: str,
@@ -59,7 +60,8 @@ class JobsManager:
         tile_ids: list[str],
     ):
         self.maap = MAAP(maap_host="api.maap-project.org")
-        self.jobs_prefix = f"tiler_{job_code}"
+        self.jobs_prefix = f"tiler_{job_code}"  # tag prefix to identify jobs
+        self.jobs_name = f"tiler_{job_code}_{job_iteration}"  # unique run name
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix
         self.algorithm_id = algorithm_id
@@ -93,7 +95,7 @@ class JobsManager:
     def submit_new_jobs(self):
         for i, tile_id in enumerate(self.get_unstarted_tiles()):
             print(f"Submitting job for tile {tile_id}...")
-            job_name = f"{self.jobs_prefix}_{tile_id}"
+            job_name = f"{self.jobs_name}_{tile_id}"
             if (
                 "N50" in tile_id
                 or "S50" in tile_id

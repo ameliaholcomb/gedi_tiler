@@ -197,7 +197,7 @@ def main(args):
             );
         """)
 
-        logfile = f"logs/tile_plan_{args.job_code}.txt"
+        logfile = f"logs/tile_plan_{args.job_code}_{args.job_iteration}.txt"
         with open(logfile, "w") as f:
             for tile_id in sorted(missing_tiles):
                 f.write(f"{tile_id}\n")
@@ -210,6 +210,7 @@ def main(args):
     # 4. Submit jobs for tiles in required_tiles but not in existing_tiles
     jobs_manager = JobsManager(
         job_code=args.job_code,
+        job_iteration=args.job_iteration,
         s3_bucket=args.bucket,
         s3_prefix=args.prefix,
         algorithm_id="gedi-tile-writer",
@@ -227,7 +228,14 @@ if __name__ == "__main__":
         "--job_code",
         type=str,
         required=True,
-        help="Shared code for all MAAP tasks created by this run.",
+        help="Shared code for all MAAP tasks in this database build (subregion identifier).",
+    )
+    parser.add_argument(
+        "--job_iteration",
+        "-i",
+        type=int,
+        required=True,
+        help="Iteration number for this run of the job code.",
     )
     parser.add_argument(
         "--shapefile",
