@@ -52,6 +52,7 @@ class JobsManager:
     def __init__(
         self,
         job_code: str,
+        job_iteration: int,
         s3_bucket: str,
         s3_prefix: str,
         algorithm_id: str,
@@ -59,21 +60,26 @@ class JobsManager:
         tile_ids: list[str],
     ):
         self.maap = MAAP(maap_host="api.maap-project.org")
-        self.jobs_prefix = f"tiler_{job_code}"
+        self.jobs_prefix = f"tiler_{job_code}"  # tag prefix to identify jobs
+        self.jobs_name = f"tiler_{job_code}_{job_iteration}"  # unique run name
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix
         self.algorithm_id = algorithm_id
         self.algorithm_version = algorithm_version
-        self.tiles = set(tile_ids)
+        self.tiles = list(set(tile_ids))
 
     def manage(self):
         tqdm.write("Checking for existing and completed jobs ...")
-        succeeded_jobs = self._fetch_jobs(JobStatus.SUCCEEDED)
-        tqdm.write(f"Completion: {len(succeeded_jobs)}/{len(self.tiles)}")
+        succeeded_jobs = _tabify_jobs(self._fetch_jobs(JobStatus.SUCCEEDED))
+        tqdm.write(f"Total succeeded jobs for this region: {len(succeeded_jobs)}")
+        succeeded_subset = succeeded_jobs.loc[succeeded_jobs.index.intersection(self.tiles)]
+        tqdm.write(f"Completion of remaining tiles: {len(succeeded_subset)}/{len(self.tiles)}")
 
-        while len(succeeded_jobs) < len(self.tiles):
+        # TODO: this could be a while loop that keeps track of jobs
+        # and issues new ones until they have all completed.
+        if len(succeeded_subset) < len(self.tiles):
             self.submit_new_jobs()
-            time.sleep(120)
+            exit(0)
 
     def get_unstarted_tiles(self):
         running_jobs = _tabify_jobs(self._fetch_jobs(JobStatus.RUNNING))
@@ -93,7 +99,7 @@ class JobsManager:
     def submit_new_jobs(self):
         for i, tile_id in enumerate(self.get_unstarted_tiles()):
             print(f"Submitting job for tile {tile_id}...")
-            job_name = f"{self.jobs_prefix}_{tile_id}"
+            job_name = f"{self.jobs_name}_{tile_id}"
             if (
                 "N50" in tile_id
                 or "S50" in tile_id

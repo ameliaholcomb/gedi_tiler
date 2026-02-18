@@ -1,0 +1,25 @@
+name: pyduck
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pandas=2.3.3
+  - geopandas=1.1.2
+  - shapely=2.1.0
+  - duckdb=1.4.1
+  - libgdal-arrow-parquet
+  - pyarrow
+  - requests
+  - boto3
+  - fsspec
+  - s3fs
+  - h5py
+  - numpy
+  - ipython
+  - tqdm
+  - ipykernel
+  - ipywidgets
+  - pip:
+      - maap-py==4.2.0
+  
