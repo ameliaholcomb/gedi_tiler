@@ -226,13 +226,14 @@ def read_checkpoint(bucket, prefix, tile_id):
     checkpoint_key = get_checkpoint_key(prefix, tile_id)
     s3_resource = boto3.resource("s3")
     obj = s3_resource.Object(bucket, checkpoint_key)
-    with obj.get()["Body"] as body:
-        return pickle.load(body)
+    output = obj.get()
+    etag = output["ETag"]
+    print(f"Read checkpoint {checkpoint_key} (ETag {etag})")
+
+    return etag, pickle.load(output["Body"])
 
 
-def write_checkpoint(
-    remaining_granules, processed_data, bucket, prefix, tile_id
-):
+def write_checkpoint(etag, remaining_granules, processed_data, bucket, prefix, tile_id):
     print(f"Writing checkpoint: {len(remaining_granules)} granules left ...")
     with open("checkpoint.pkl", "wb") as f:
         pickle.dump(
@@ -241,8 +242,23 @@ def write_checkpoint(
         )
     key = get_checkpoint_key(prefix, tile_id)
     s3_resource = boto3.resource("s3")
-    s3_resource.Object(bucket, key).put(Body=open("checkpoint.pkl", "rb"))
-    return
+    checkpoint = s3_resource.Object(bucket, key)
+
+    if etag:
+        # We have an etag, so the checkpoint file already exists.  Using IfMatch
+        # ensures that overwriting the checkpoint fails if it has changed since
+        # we read it (so we don't clobber the changes made by another job).
+        print(f"Updating checkpoint {key} (ETag {etag})")
+        output = checkpoint.put(Body=open("checkpoint.pkl", "rb"), IfMatch=etag)
+    else:
+        # We have no etag, so the checkpoint did not exist when we looked for it.
+        # Using IfNoneMatch="*" ensures that writing the checkpoint fails if
+        # it now exists (i.e., another job wrote the initial checkpoint before we
+        # could do so).
+        print(f"Creating new checkpoint {key}")
+        output = checkpoint.put(Body=open("checkpoint.pkl", "rb"), IfNoneMatch="*")
+
+    return output["ETag"]
 
 
 def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
@@ -264,11 +280,12 @@ def load_work_plan(tile_id: str, bucket: str, prefix: str, test: bool = False):
     checkpoint_url = f"s3://{bucket}/{get_checkpoint_key(prefix, tile_id)}"
     if s3_utils.s3_prefix_exists(checkpoint_url):
         print("Restoring from checkpoint ...")
-        granules_to_process, processed_data = read_checkpoint(
+        etag, (granules_to_process, processed_data) = read_checkpoint(
             bucket, prefix, tile_id
         )
     else:
         print("Loading new work plan from metadata ...")
+        etag = None
         granules_to_process = load_tile_metadata(tile_id, bucket, prefix)
         processed_data = pd.DataFrame()
 
@@ -277,7 +294,7 @@ def load_work_plan(tile_id: str, bucket: str, prefix: str, test: bool = False):
         granules_to_process = granules_to_process.head(2)
         print(f"Testing mode: using {len(granules_to_process)}/{tot} granules.")
 
-    return granules_to_process, processed_data
+    return etag, (granules_to_process, processed_data)
 
 
 def run_main(args: argparse.Namespace):
@@ -286,7 +303,7 @@ def run_main(args: argparse.Namespace):
 
     # Load metadata for the tile
     print("Reading metadata and checkpoints for tile ...")
-    granules, processed_data = load_work_plan(
+    etag, (granules, processed_data) = load_work_plan(
         args.tile_id, args.bucket, args.prefix, args.test
     )
     t2 = time.time()
@@ -317,7 +334,10 @@ def run_main(args: argparse.Namespace):
             )
             print(f"Loaded {len(df)} shots from granule {row.granule_key}.")
             dfs.append(df)
-        write_checkpoint(
+        # If we successfully write the checkpoint, we'll get a new etag value,
+        # which we'll pass to the next checkpoint write.
+        etag = write_checkpoint(
+            etag,
             remaining_granules=granules.iloc[i + batch_size :],
             processed_data=pd.concat(dfs),
             bucket=args.bucket,
