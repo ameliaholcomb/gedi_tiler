@@ -1,0 +1,44 @@
+[project]
+name = "gedi-tiler"
+version = "0.1.0"
+description = "Library to create and query a tiled GEDI database on the MAAP"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Amelia Holcomb", email = "amelia.holcomb@gmail.com" }
+]
+dependencies = [
+    "duckdb>=1.4.1",
+    "h5py",
+    "geopandas>=1.1.2",
+    "pandas>=2.3.3",
+    "numpy",
+    "boto3",
+    "fsspec",
+    "s3fs",
+    "shapely>=2.1.0",
+    "pyarrow",
+    "requests",
+    "tqdm",
+    "maap-py>=4.2.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "coverage",
+    "pytest",
+    "pytest-cookies",
+    "ruff",
+    "ty",
+]
+
+[project.urls]
+homepage = "https://github.com/ameliaholcomb/gedi_tiler"
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["gtiler*"]

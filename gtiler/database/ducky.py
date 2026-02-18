@@ -3,7 +3,7 @@ import duckdb
 import geopandas as gpd
 import warnings
 
-from . import tiles
+from gtiler.database import tiles
 
 TILE_ID = "tile_id"
 YEAR = "year"

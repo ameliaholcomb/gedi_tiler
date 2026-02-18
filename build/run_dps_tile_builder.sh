@@ -44,4 +44,4 @@ fi
 # Any output written to the stdout and stderr streams will be
 # automatically captured and placed in the output dir
 
-conda run --live-stream --name python python ${basedir}/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --checkpoint_interval ${checkpoint_interval} ${test} ${quality}
+conda run --live-stream --name python python ${basedir}/../scripts/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --checkpoint_interval ${checkpoint_interval} ${test} ${quality}
