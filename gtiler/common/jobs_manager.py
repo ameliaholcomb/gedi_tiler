@@ -66,16 +66,20 @@ class JobsManager:
         self.s3_prefix = s3_prefix
         self.algorithm_id = algorithm_id
         self.algorithm_version = algorithm_version
-        self.tiles = set(tile_ids)
+        self.tiles = list(set(tile_ids))
 
     def manage(self):
         tqdm.write("Checking for existing and completed jobs ...")
-        succeeded_jobs = self._fetch_jobs(JobStatus.SUCCEEDED)
-        tqdm.write(f"Completion: {len(succeeded_jobs)}/{len(self.tiles)}")
+        succeeded_jobs = _tabify_jobs(self._fetch_jobs(JobStatus.SUCCEEDED))
+        tqdm.write(f"Total succeeded jobs for this region: {len(succeeded_jobs)}")
+        succeeded_subset = succeeded_jobs.loc[succeeded_jobs.index.intersection(self.tiles)]
+        tqdm.write(f"Completion of remaining tiles: {len(succeeded_subset)}/{len(self.tiles)}")
 
-        while len(succeeded_jobs) < len(self.tiles):
+        # TODO: this could be a while loop that keeps track of jobs
+        # and issues new ones until they have all completed.
+        if len(succeeded_subset) < len(self.tiles):
             self.submit_new_jobs()
-            time.sleep(120)
+            exit(0)
 
     def get_unstarted_tiles(self):
         running_jobs = _tabify_jobs(self._fetch_jobs(JobStatus.RUNNING))
