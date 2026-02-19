@@ -3,8 +3,7 @@ import geopandas as gpd
 import os
 import pandas as pd
 
-# Move these to a shared library
-from tile_runner import _get_granule_metadata
+from gtiler.common.granule_metadata import get_granule_metadata
 
 from gtiler.common import shape_parser, s3_utils
 from gtiler.database import ducky, tiles
@@ -24,7 +23,7 @@ def main(args):
         GediProduct.L4C,
     ]
     # Get CMR metadata for all granules covering the region
-    cmr_md = _get_granule_metadata(
+    cmr_md = get_granule_metadata(
         shape_parser.check_and_format_shape(covering), products
     )
     tile_granule_gdf = covering_tiles.sjoin(

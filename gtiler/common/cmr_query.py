@@ -8,7 +8,7 @@ import requests
 from shapely.geometry import MultiPolygon, Polygon
 from typing import Dict, Optional, Tuple
 
-from ..database.schema import GediProduct
+from gtiler.database.schema import GediProduct
 
 
 CMR_URL = "https://cmr.earthdata.nasa.gov/search/"
