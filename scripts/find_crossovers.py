@@ -7,6 +7,7 @@ distance of each other, with support for user-supplied filters and data columns.
 import argparse
 import h3
 import geopandas as gpd
+import os
 from maap.maap import MAAP
 from typing import List, Optional, Union
 
@@ -21,7 +22,8 @@ def main(args):
 
     maap = MAAP()
     username = maap.profile.account_info()['username']
-    temp_dir = f"s3://maap-ops-workspace/{username}/.tmp/duckdb_tmp"
+    temp_dir = "/.tmp/duckdb_tmp"
+    os.makedirs(temp_dir, exist_ok=True)
     con = ducky.init_duckdb(temp_dir)
     data_spec = ducky.brazil_data_spec()
 
