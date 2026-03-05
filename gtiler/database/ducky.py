@@ -9,7 +9,7 @@ TILE_ID = "tile_id"
 YEAR = "year"
 
 
-def init_duckdb(temp_dir: str):
+def init_duckdb(temp_dir: str = None):
     con = duckdb.connect()
     # con.execute("SET access_mode = 'READ_ONLY';")
     con.install_extension("spatial")
@@ -22,7 +22,8 @@ def init_duckdb(temp_dir: str):
     con.execute("SET enable_progress_bar = true;")
     con.execute("SET preserve_insertion_order = false;")
     con.execute("SET memory_limit = '8GB';")
-    con.sql(f"SET temp_directory='{temp_dir}'")
+    if temp_dir:
+        con.sql(f"SET temp_directory='{temp_dir}'")
     con.sql("SET max_temp_directory_size = '100GB'")
     return con
 
