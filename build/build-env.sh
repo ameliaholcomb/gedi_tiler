@@ -6,4 +6,5 @@ set -euo pipefail
 basedir=$( cd "$(dirname "$0")" ; pwd -P )
 
 conda env update -f ${basedir}/../pyduck-environment.yml
+conda activate pyduck
 pip install -e ${basedir}/..
