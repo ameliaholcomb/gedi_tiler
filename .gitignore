@@ -4,3 +4,4 @@
 .tmp/*
 logs/*
 *.egg-info/*
+demos/drafts/*
