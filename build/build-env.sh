@@ -5,6 +5,5 @@ set -euo pipefail
 # Get current location of build script
 basedir=$( cd "$(dirname "$0")" ; pwd -P )
 
-conda env update -f ${basedir}/../pyduck-environment.yml
-conda activate pyduck
-pip install -e ${basedir}/..
+conda env update -f ${basedir}/../environment.yml
+conda run -n pyduck python -m pip install -e ${basedir}/..

@@ -2,13 +2,28 @@ import argparse
 import geopandas as gpd
 import pandas as pd
 import time
+from maap.maap import MAAP
 
 from gtiler.common import shape_parser, s3_utils
 from gtiler.common.granule_metadata import get_granule_metadata
-from gtiler.common.jobs_manager import JobsManager
 from gtiler.database import ducky, tiles
 from gtiler.database.schema import GediProduct
 
+def get_queue(tile_id):
+    if (("N48" in tile_id) |
+        ("S48" in tile_id) |
+        ("N49" in tile_id) |
+        ("S49" in tile_id) |
+        ("N50" in tile_id) | 
+        ("S50" in tile_id) |
+        ("N51" in tile_id) |
+        ("S51" in tile_id)):
+        return "maap-dps-worker-16gb"
+    if (("N52" in tile_id) |
+        ("S52" in tile_id)):
+        return "maap-dps-worker-32gb"
+    else:
+        return "maap-dps-worker-8gb"
 
 def main(args):
     # Metadata is written first, then data is backfilled by the DPS jobs.
@@ -42,6 +57,9 @@ def main(args):
         start_year=args.start_year,
         end_year=args.end_year,
     )
+    BAD_GRANULES = ["O33765_03"]
+    cmr_md = cmr_md[~cmr_md.granule_key.isin(BAD_GRANULES)]
+    
     # Save the geometry column so that it will not be dropped in the sjoin
     cmr_md["granule_geometry"] = cmr_md.geometry
     # Join to find which granules are needed for each tile
@@ -111,7 +129,8 @@ def main(args):
     # 3. Create new metadata dataframe for tiles in region and write to S3
     # the metadata that we expect to describe the database after all jobs complete
     if len(tile_granule_gdf) > 0:
-        input("To proceed to create tile metadata, press ENTER >>>")
+        if not args.no_confirm:
+            input("To proceed to create tile metadata, press ENTER >>>")
         print("Writing metadata for required tiles to S3...")
 
         ducky.gdf_to_duck(
@@ -137,20 +156,34 @@ def main(args):
         print(
             f"Proposed metadata for tiles listed in {logfile} written to database."
         )
-
-    input("To proceed to create jobs, press ENTER >>>")
+    if not args.no_confirm:
+        input("To proceed to create jobs, press ENTER >>>")
 
     # 4. Submit jobs for tiles in required_tiles but not in existing_tiles
-    jobs_manager = JobsManager(
-        job_code=args.job_code,
-        job_iteration=args.job_iteration,
-        s3_bucket=args.bucket,
-        s3_prefix=args.prefix,
-        algorithm_id="gedi-tile-writer",
-        algorithm_version="amelia-deploy-fskBFkTO",
-        tile_ids=missing_tiles,
-    )
-    jobs_manager.manage()
+    maap = MAAP()
+    # too many tasks result in quota limits on DAAC S3 reads
+    max_tasks = 900
+    # issue in batches of 50 every 5 minutes.
+    for i in range(0, len(missing_tiles), 50):
+        batch = missing_tiles[i : i + 50]
+        for tile_id in batch:
+            print(f"Submitting job for tile {tile_id}...")
+            job_name = f"tiler_{args.job_code}_{args.job_iteration}"
+            queue = get_queue(tile_id)
+            job = maap.submitJob(
+                identifier=job_name,
+                algo_id="gedi-tile-writer",
+                version="amelia-deploy-5TNH7WSm",
+                queue=queue,
+                bucket=args.bucket,
+                prefix=args.prefix,
+                tile_id=tile_id,
+                checkpoint_interval=25,
+                quality="quality",
+            )
+        if i >= max_tasks:
+            return
+        time.sleep(5 * 60)
 
 
 if __name__ == "__main__":
@@ -203,6 +236,12 @@ if __name__ == "__main__":
         "--dry_run",
         action="store_true",
         help="Print execution plan, but do not run any MAAP jobs.",
+    )
+    parser.add_argument(
+        "--no_confirm",
+        "-y",
+        action="store_true",
+        help="Skip confirmation of work plan before writing metadata and creating jobs.",
     )
 
     args = parser.parse_args()
