@@ -187,6 +187,8 @@ def load_granule(
     for product_schema, s3url in product_files:
         print("Reading product", product_schema.product_level, "from", s3url)
         df = load_granule_product(rfs, s3url, product_schema, tile)
+        if len(df) == 0:
+            return pd.DataFrame({})
         dfs.append(df)
     full_df = dfs[0]
     for df in dfs[1:]:
