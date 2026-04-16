@@ -173,7 +173,7 @@ def main(args):
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
-                version="amelia-deploy-ND6elkXj",
+                version="amelia-deploy-5TNH7WSm",
                 queue=queue,
                 bucket=args.bucket,
                 prefix=args.prefix,
