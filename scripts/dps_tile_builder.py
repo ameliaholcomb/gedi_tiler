@@ -12,6 +12,7 @@ import time
 from gtiler.database import ducky
 from gtiler.database.tiles import Tile
 from gtiler.common import s3_utils
+from gtiler.common import checkpoint_lib
 from gtiler.database.schema import SCHEMA
 from gtiler.database.schema import Product, GeometryColumn  # typing only
 
@@ -52,6 +53,21 @@ def get_cmd_args():
             "Tile ID to process. 1ºx1º degree tiles in the format"
             "[N/S][DD][E/W][DDD], defining the coordinates of the"
             "top-left corner of the tile."
+        ),
+    )
+    p.add_argument(
+        "-g",
+        "--generation",
+        dest="generation",
+        type=int,
+        default=0,
+        help=(
+            "Generation number for this job. Used for optimistic concurrency"
+            "control of checkpoints. Increment this number to start a new "
+            "generation of checkpoints, which will cause older jobs to fail in "
+            "favor of the new generation. If the generation number is not "
+            "incremented, jobs issued for the same tile will simply win based on "
+            "which writes to the checkpoint first."
         ),
     )
     p.add_argument(
@@ -220,48 +236,6 @@ def load_granule(
     return full_df
 
 
-def get_checkpoint_key(prefix, tile_id):
-    return f"{prefix}/checkpoints/{tile_id}/checkpoint.pkl"
-
-
-def read_checkpoint(bucket, prefix, tile_id):
-    checkpoint_key = get_checkpoint_key(prefix, tile_id)
-    s3_resource = boto3.resource("s3")
-    obj = s3_resource.Object(bucket, checkpoint_key)
-    output = obj.get()
-    etag = output["ETag"]
-    print(f"Read checkpoint {checkpoint_key} (ETag {etag})")
-
-    return etag, pickle.load(output["Body"])
-
-
-def write_checkpoint(etag, remaining_granules, processed_data, bucket, prefix, tile_id):
-    print(f"Writing checkpoint: {len(remaining_granules)} granules left ...")
-    with open("checkpoint.pkl", "wb") as f:
-        pickle.dump(
-            (remaining_granules, processed_data),
-            f,
-        )
-    key = get_checkpoint_key(prefix, tile_id)
-    s3_resource = boto3.resource("s3")
-    checkpoint = s3_resource.Object(bucket, key)
-
-    if etag:
-        # We have an etag, so the checkpoint file already exists.  Using IfMatch
-        # ensures that overwriting the checkpoint fails if it has changed since
-        # we read it (so we don't clobber the changes made by another job).
-        print(f"Updating checkpoint {key} (ETag {etag})")
-        output = checkpoint.put(Body=open("checkpoint.pkl", "rb"), IfMatch=etag)
-    else:
-        # We have no etag, so the checkpoint did not exist when we looked for it.
-        # Using IfNoneMatch="*" ensures that writing the checkpoint fails if
-        # it now exists (i.e., another job wrote the initial checkpoint before we
-        # could do so).
-        print(f"Creating new checkpoint {key}")
-        output = checkpoint.put(Body=open("checkpoint.pkl", "rb"), IfNoneMatch="*")
-
-    return output["ETag"]
-
 
 def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
     """Load metadata for a specific tile from S3.
@@ -277,40 +251,29 @@ def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
     return gpd.read_file(md_spec)
 
 
-def load_work_plan(tile_id: str, bucket: str, prefix: str, test: bool = False):
-    """Get the work plan for this task from metadata and checkpoints."""
-    checkpoint_url = f"s3://{bucket}/{get_checkpoint_key(prefix, tile_id)}"
-    if s3_utils.s3_prefix_exists(checkpoint_url):
-        print("Restoring from checkpoint ...")
-        etag, (granules_to_process, processed_data) = read_checkpoint(
-            bucket, prefix, tile_id
-        )
-    else:
-        print("Loading new work plan from metadata ...")
-        etag = None
-        granules_to_process = load_tile_metadata(tile_id, bucket, prefix)
-        processed_data = pd.DataFrame()
-
-    if test:
-        tot = len(granules_to_process)
-        granules_to_process = granules_to_process.head(2)
-        print(f"Testing mode: using {len(granules_to_process)}/{tot} granules.")
-
-    return etag, (granules_to_process, processed_data)
-
-
 def run_main(args: argparse.Namespace):
     """Main function to create a tile."""
     t1 = time.time()
 
     # Load metadata for the tile
     print("Reading metadata and checkpoints for tile ...")
-    etag, (granules, processed_data) = load_work_plan(
-        args.tile_id, args.bucket, args.prefix, args.test
-    )
+    checkpointer = checkpoint_lib.Checkpointer(
+        args.bucket, args.prefix, args.tile_id, generation=args.generation)
+    initial_checkpoint = checkpointer.initialize()
+    if initial_checkpoint is None:
+        print("Loading new work plan from metadata ...")
+        granules_to_process = load_tile_metadata(args.tile_id, args.bucket, args.prefix)
+        processed_data = pd.DataFrame()
+    else:
+        granules_to_process, processed_data = initial_checkpoint
+    if args.test:
+        tot = len(granules_to_process)
+        granules_to_process = granules_to_process.head(2)
+        print(f"Testing mode: using {len(granules_to_process)}/{tot} granules.")
+
     t2 = time.time()
     print(f"{len(processed_data)} shots already processed.")
-    print(f"Planning to process {len(granules)} new granules.")
+    print(f"Planning to process {len(granules_to_process)} new granules.")
     print(f"Loading metadata and checkpoints took {t2 - t1:.1f} seconds.")
 
     # Set up access to the ORNL and LP DAACs
@@ -318,8 +281,8 @@ def run_main(args: argparse.Namespace):
 
     dfs = [processed_data]
     batch_size = args.checkpoint_interval
-    for i in range(0, len(granules), batch_size):
-        batch = granules[i : i + batch_size]
+    for i in range(0, len(granules_to_process), batch_size):
+        batch = granules_to_process[i : i + batch_size]
         for row in batch.itertuples():
             print(f"Loading granule {row.granule_key} ...")
             df = load_granule(
@@ -336,15 +299,9 @@ def run_main(args: argparse.Namespace):
             )
             print(f"Loaded {len(df)} shots from granule {row.granule_key}.")
             dfs.append(df)
-        # If we successfully write the checkpoint, we'll get a new etag value,
-        # which we'll pass to the next checkpoint write.
-        etag = write_checkpoint(
-            etag,
-            remaining_granules=granules.iloc[i + batch_size :],
+        checkpointer.write_checkpoint(
+            granules_to_process=granules_to_process.iloc[i + batch_size :],
             processed_data=pd.concat(dfs),
-            bucket=args.bucket,
-            prefix=args.prefix,
-            tile_id=args.tile_id,
         )
     full_df = pd.concat(dfs)
     full_df["tile_id"] = args.tile_id

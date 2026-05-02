@@ -203,6 +203,7 @@ def main(args):
                 bucket=args.bucket,
                 prefix=args.prefix,
                 tile_id=tile_id,
+                generation=args.job_iteration,
                 checkpoint_interval=25,
                 quality="quality",
             )

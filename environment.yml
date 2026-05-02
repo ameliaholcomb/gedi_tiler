@@ -10,8 +10,10 @@ dependencies:
   - duckdb=1.4.1
   - libgdal-arrow-parquet
   - pyarrow
+  - pytest
   - requests
   - boto3
+  - moto
   - fsspec
   - s3fs
   - h5py

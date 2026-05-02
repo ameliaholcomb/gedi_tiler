@@ -1,9 +1,9 @@
 algorithm_description: Create a 1x1 tile of GEDI data
 algorithm_name: gedi-tile-writer
-algorithm_version: amelia-deploy-fskBFkTO
+algorithm_version: amelia-deploy-5TNH7WSm
 build_command: gedi_tiler/build/build-env.sh
-disk_space: 5GB
-docker_container_url: mas.maap-project.org/root/maap-workspaces/base_images/vanilla:v3.1.5
+disk_space: 10GB
+docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v5.0.0
 inputs:
   config: []
   positional:
@@ -20,6 +20,15 @@ inputs:
       defining the coordinates of the top-left corner of the tile.
     name: tile_id
     required: true
+  - default: '0'
+    description: Generation number for this job. Used for optimistic concurrency
+            control of checkpoints. Increment this number to start a new 
+            generation of checkpoints, which will cause older jobs to fail in 
+            favor of the new generation. If the generation number is not 
+            incremented, jobs issued for the same tile will simply win based on 
+            which writes to the checkpoint first.
+    name: generation
+    required: true
   - default: '30'
     description: Number of granules to process between writing checkpoints.
     name: checkpoint_interval
@@ -32,6 +41,6 @@ inputs:
     description: Quality-filter granules before adding to database
     name: quality
     required: false
-queue: maap-dps-worker-32gb
+queue: maap-dps-worker-8gb
 repository_url: https://github.com/ameliaholcomb/gedi_tiler.git
 run_command: gedi_tiler/build/run_dps_tile_builder.sh
