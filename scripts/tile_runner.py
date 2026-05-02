@@ -1,4 +1,5 @@
 import argparse
+import boto3
 import geopandas as gpd
 import pandas as pd
 import time
@@ -10,7 +11,9 @@ from gtiler.database import ducky, tiles
 from gtiler.database.schema import GediProduct
 
 def get_queue(tile_id):
-    if (("N48" in tile_id) |
+    if (("N47" in tile_id) |
+        ("S47" in tile_id) |
+        ("N48" in tile_id) |
         ("S48" in tile_id) |
         ("N49" in tile_id) |
         ("S49" in tile_id) |
@@ -25,6 +28,24 @@ def get_queue(tile_id):
     else:
         return "maap-dps-worker-8gb"
 
+def get_tile_ids_novalidation(bucket, prefix):
+    prefix = f"{prefix}/data/"
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    tile_ids = []
+
+    for page in paginator.paginate(
+        Bucket=bucket,
+        Prefix=prefix,
+        Delimiter="/",          # stop at the next path segment
+    ):
+        for cp in page.get("CommonPrefixes", []):
+            # cp["Prefix"] looks like: "path/to/data/tile_id=N06_W123/"
+            segment = cp["Prefix"].rstrip("/").split("/")[-1]  # "tile_id=N06_W123"
+            if segment.startswith("tile_id="):
+                tile_ids.append(segment.split("=", 1)[1])     # "N06_W123"
+    return tile_ids
+    
 def main(args):
     # Metadata is written first, then data is backfilled by the DPS jobs.
     # DPS jobs can fail, be re-run, etc, but the metadata is only written once.
@@ -92,12 +113,16 @@ def main(args):
     print("Checking for existing tiles in the database...")
     path = ducky.data_prefix(args.bucket, args.prefix)
     if s3_utils.s3_prefix_exists(path):
-        data_spec = ducky.data_spec(args.bucket, args.prefix)
-        existing_tiles = con.execute(
-            f"SELECT DISTINCT tile_id FROM read_parquet('{data_spec}')"
-        ).fetchall()
-        existing_tiles = {x[0] for x in existing_tiles}
-        # TODO: Do we need a way for jobs to mark that they completed but had no data?
+        if args.fast_scan:
+            existing_tiles = set(get_tile_ids_novalidation(args.bucket, args.prefix))
+            print(len(existing_tiles))
+        else:
+            data_spec = ducky.data_spec(args.bucket, args.prefix)
+            existing_tiles = con.execute(
+                f"SELECT DISTINCT tile_id FROM read_parquet('{data_spec}')"
+            ).fetchall()
+            existing_tiles = {x[0] for x in existing_tiles}
+            # TODO: Do we need a way for jobs to mark that they completed but had no data?
     else:
         existing_tiles = set()
 
@@ -178,6 +203,7 @@ def main(args):
                 bucket=args.bucket,
                 prefix=args.prefix,
                 tile_id=tile_id,
+                generation=args.job_iteration,
                 checkpoint_interval=25,
                 quality="quality",
             )
@@ -242,6 +268,11 @@ if __name__ == "__main__":
         "-y",
         action="store_true",
         help="Skip confirmation of work plan before writing metadata and creating jobs.",
+    )
+    parser.add_argument(
+        "--fast_scan",
+        action="store_true",
+        help="Quickly scan existing tiles in database without checking for valid parquet files.",
     )
 
     args = parser.parse_args()

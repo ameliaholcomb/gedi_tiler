@@ -58,6 +58,7 @@ class RefreshableFSSpec:
             **fsspec_kwargs,
         )
 
+
 def s3_prefix_exists(s3_path: str) -> bool:
     """Check if an S3 prefix exists.
 
@@ -65,6 +66,61 @@ def s3_prefix_exists(s3_path: str) -> bool:
         s3_path: S3 path to check (e.g. s3://bucket/prefix/)
     Returns:
         True if the prefix exists, False otherwise.
-        """
+    """
     fs = fsspec.filesystem("s3")
     return fs.exists(s3_path)
+
+
+def conditional_multipart_put(
+    bucket: str, key: str, data: bytes, *, if_match: str = None, if_none_match: str = None
+) -> str:
+    """Upload bytes to S3 using multipart upload with a conditional write.
+
+    The condition is evaluated atomically at CompleteMultipartUpload time.
+
+    Args:
+        if_match: Require the existing object to have this ETag (for updates).
+        if_none_match: Pass "*" to require the object not to exist (for creates).
+    Returns:
+        The ETag of the newly written object.
+    Raises:
+        botocore.exceptions.ClientError with code "PreconditionFailed"
+            if the condition is not satisfied.
+    """
+    s3_client = boto3.client("s3")
+    mpu = s3_client.create_multipart_upload(Bucket=bucket, Key=key)
+    upload_id = mpu["UploadId"]
+
+    try:
+        parts = []
+        chunk_size = 5 * 1024 * 1024  # 5 MB minimum for non-final parts
+        part_number = 1
+        for offset in range(0, len(data), chunk_size):
+            chunk = data[offset : offset + chunk_size]
+            resp = s3_client.upload_part(
+                Bucket=bucket,
+                Key=key,
+                UploadId=upload_id,
+                PartNumber=part_number,
+                Body=chunk,
+            )
+            parts.append({"PartNumber": part_number, "ETag": resp["ETag"]})
+            part_number += 1
+
+        complete_kwargs = {
+            "Bucket": bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "MultipartUpload": {"Parts": parts},
+        }
+        if if_match is not None:
+            complete_kwargs["IfMatch"] = if_match
+        if if_none_match is not None:
+            complete_kwargs["IfNoneMatch"] = if_none_match
+
+        response = s3_client.complete_multipart_upload(**complete_kwargs)
+        return response["ETag"]
+
+    except Exception:
+        s3_client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        raise
