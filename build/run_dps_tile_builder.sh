@@ -24,15 +24,16 @@ INPUT_DIR=input
 bucket=$1
 prefix=$2
 tile_id=$3
-checkpoint_interval=$4
+generation=$4
+checkpoint_interval=$5
 
 # Is there a better way to pass boolean flags?
-if [ -n "$5" ]; then
+if [ -n "$6" ]; then
     test="--test"
 else
     test=""
 fi
-if [ -n "$6" ]; then
+if [ -n "$7" ]; then
     quality="--quality"
 else
     quality=""
@@ -44,4 +45,4 @@ fi
 # Any output written to the stdout and stderr streams will be
 # automatically captured and placed in the output dir
 
-conda run --live-stream --name pyduck python ${basedir}/../scripts/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --checkpoint_interval ${checkpoint_interval} ${test} ${quality}
+conda run --live-stream --name pyduck python ${basedir}/../scripts/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --generation ${generation} --checkpoint_interval ${checkpoint_interval} ${test} ${quality}
