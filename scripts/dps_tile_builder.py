@@ -288,7 +288,7 @@ def run_main(args: argparse.Namespace):
     for i in range(0, len(granules_to_process), batch_size):
         batch = granules_to_process[i : i + batch_size]
         for row in batch.itertuples():
-            logger.debug("Loading granule %s ...", row.granule_key)
+            logger.info("Loading granule %s ...", row.granule_key)
             df = load_granule(
                 rfs=rfs,
                 granule=row.granule_key,
@@ -301,7 +301,7 @@ def run_main(args: argparse.Namespace):
                 tile=args.tile,
                 qf=args.quality,
             )
-            logger.debug("Loaded %d shots from granule %s.", len(df), row.granule_key)
+            logger.info("Loaded %d shots from granule %s.", len(df), row.granule_key)
             dfs.append(df)
         checkpointer.write_checkpoint(
             granules_to_process=granules_to_process.iloc[i + batch_size :],
@@ -339,7 +339,7 @@ def run_main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stderr,
