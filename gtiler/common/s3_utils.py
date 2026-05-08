@@ -1,5 +1,8 @@
 import boto3
 import fsspec
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class RefreshableFSSpec:
@@ -16,18 +19,18 @@ class RefreshableFSSpec:
         return self.fs
 
     def assume_role_credentials(self, ssm_parameter_name):
-        print("Assuming role to access S3...")
+        logger.info("Assuming role to access S3...")
         # Create a session using the default personal credentials
         session = boto3.Session()
 
-        print("Retrieving SSM parameter for role ARN...")
+        logger.info("Retrieving SSM parameter for role ARN...")
         # Retrieve the SSM parameter
         ssm = session.client("ssm", "us-west-2")
         parameter = ssm.get_parameter(
             Name=ssm_parameter_name, WithDecryption=True
         )
         parameter_value = parameter["Parameter"]["Value"]
-        print(f"Assuming role: {parameter_value}")
+        logger.info("Assuming role: %s", parameter_value)
 
         # Assume the DAAC access role
         sts = session.client("sts")
@@ -39,7 +42,7 @@ class RefreshableFSSpec:
         # From the response that contains the assumed role, get the temporary
         # credentials that can be used to make subsequent API calls
         credentials = assumed_role_object["Credentials"]
-        print("Role assumed, temporary credentials obtained.")
+        logger.info("Role assumed, temporary credentials obtained.")
 
         return credentials
 

@@ -1,6 +1,10 @@
 import argparse
+import logging
+import sys
 
 from gtiler.database import ducky
+
+logger = logging.getLogger(__name__)
 
 def main(args):
     # 1. Create a new database containing only updated years
@@ -11,8 +15,8 @@ def main(args):
                --shapefile {args.shapefile} \
                --start_year {args.start_year} \
                --end_year {args.end_year}"""
-    print("Create an updates table using the following command:")
-    print(command)
+    logger.info("Create an updates table using the following command:")
+    logger.info("%s", command)
     input("When these jobs have completed, press ENTER to continue >>>")
 
     # 2. Merge the update data into the main tiled database
@@ -20,8 +24,8 @@ def main(args):
                 s3://{args.bucket}/{args.prefix}_updates/data \
                 s3://{args.bucket}/{args.prefix}/data \
                 --recursive"""
-    print("Merge the update data into the main tiled database using the following command:")
-    print(command)
+    logger.info("Merge the update data into the main tiled database using the following command:")
+    logger.info("%s", command)
     input("When this command has completed, press ENTER to continue >>>")
 
     # 3. Update the metadata
@@ -33,8 +37,8 @@ def main(args):
                     {existing_md_prefix} \
                     {existing_md_prefix.rstrip('/')}_old/ \
                     --recursive"""
-        print("Back up existing metadata using the following command:")
-        print(command)
+        logger.info("Back up existing metadata using the following command:")
+        logger.info("%s", command)
         input("When this command has completed, press ENTER to continue >>>")
     
     existing_md_spec = ducky.metadata_spec(args.bucket, args.prefix)
@@ -119,6 +123,12 @@ if __name__ == "__main__":
         "--save_md",
         action="store_true",
         help="Save old metadata files to metadata_old.",
+    )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
     )
     args = parser.parse_args()
     main(args)

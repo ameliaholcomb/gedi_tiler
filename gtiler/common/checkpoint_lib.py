@@ -1,10 +1,13 @@
 import boto3
 from botocore.exceptions import ClientError
 from dataclasses import dataclass
+import logging
 import pandas as pd
 import pickle
 
 from gtiler.common import s3_utils
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,8 +47,9 @@ class Checkpointer:
         """
         checkpoint_url = f"s3://{self.bucket}/{self.checkpoint_key}"
         if s3_utils.s3_prefix_exists(checkpoint_url):
-            print("Restoring from checkpoint ...")
+            logger.info("Restoring from checkpoint ...")
             checkpoint = self.read_checkpoint()
+            logger.debug("%s", checkpoint)
             # immediately try to write the checkpoint back to claim ownership
             # of this generation
             self.write_checkpoint(
@@ -73,7 +77,7 @@ class Checkpointer:
         if not isinstance(checkpoint, CheckpointData):
             checkpoint = self._legacy_parse_checkpoint(checkpoint)
         if checkpoint.generation > self.generation:
-            raise CheckpointConflict
+            raise CheckpointConflict(f"Read gen {checkpoint.generation} > {self.generation}")
         return checkpoint
 
     def write_checkpoint(
@@ -90,7 +94,7 @@ class Checkpointer:
             granules_to_process=granules_to_process,
             processed_data=processed_data,
         )
-        print(f"Writing checkpoint: {checkpoint}")
+        logger.debug("Writing checkpoint: %s", checkpoint)
         try:
             if self.etag is None:  # First write, no existing checkpoint
                 self.etag = s3_utils.conditional_multipart_put(
@@ -111,13 +115,13 @@ class Checkpointer:
                 raise
             existing_checkpoint = self.read_checkpoint()
             if existing_checkpoint.generation >= self.generation:
-                raise CheckpointConflict
+                raise CheckpointConflict(f"Read gen {existing_checkpoint.generation} > {self.generation}")
             else:
-                print(f"""
-                    Checkpoint generation {existing_checkpoint.generation} \
-                    lower than job generation {self.generation}, \
-                    retrying write ...
-                """)
+                logger.info(
+                    "Checkpoint generation %d lower than job generation %d, retrying write ...",
+                    existing_checkpoint.generation,
+                    self.generation,
+                )
                 return self.write_checkpoint(
                     granules_to_process, processed_data
                 )

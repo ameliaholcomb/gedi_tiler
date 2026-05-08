@@ -1,7 +1,9 @@
 import argparse
 import boto3
 import geopandas as gpd
+import logging
 import pandas as pd
+import sys
 import time
 from maap.maap import MAAP
 
@@ -9,6 +11,8 @@ from gtiler.common import shape_parser, s3_utils
 from gtiler.common.granule_metadata import get_granule_metadata
 from gtiler.database import ducky, tiles
 from gtiler.database.schema import GediProduct
+
+logger = logging.getLogger(__name__)
 
 def get_queue(tile_id):
     if (("N47" in tile_id) |
@@ -59,7 +63,7 @@ def main(args):
     # It then submits a job for each tile in the region that does not already exist in S3://<db>/data/.
 
     # 1. Get required tiles for region
-    print("Determining required tiles for region...")
+    logger.info("Determining required tiles for region...")
     covering_tiles, covering = tiles.get_covering_tiles_for_region(args.shape)
     products = [
         GediProduct.L2A,
@@ -93,7 +97,7 @@ def main(args):
 
     # 2. Get existing metadata tiles in S3
     con = ducky.init_duckdb()
-    print("Scanning existing metadata ...")
+    logger.info("Scanning existing metadata ...")
     path = ducky.metadata_prefix(args.bucket, args.prefix)
     if s3_utils.s3_prefix_exists(path):
         md_spec = ducky.metadata_spec(args.bucket, args.prefix)
@@ -110,12 +114,12 @@ def main(args):
 
     # 3. Get existing tiles in the database
     # check if the database path exists:
-    print("Checking for existing tiles in the database...")
+    logger.info("Checking for existing tiles in the database...")
     path = ducky.data_prefix(args.bucket, args.prefix)
     if s3_utils.s3_prefix_exists(path):
         if args.fast_scan:
             existing_tiles = set(get_tile_ids_novalidation(args.bucket, args.prefix))
-            print(len(existing_tiles))
+            logger.info("Found %d existing tiles (fast scan).", len(existing_tiles))
         else:
             data_spec = ducky.data_spec(args.bucket, args.prefix)
             existing_tiles = con.execute(
@@ -129,24 +133,23 @@ def main(args):
     # tiles with data but no metadata:
     wrong = [x for x in existing_tiles if x not in existing_md]
     if len(wrong) > 0:
-        print(
-            f"Warning: {len(wrong)} tiles have data but no metadata."
-            " Please delete these tiles from the database before continuing:"
-            ", ".join(wrong)
+        logger.warning(
+            "Warning: %d tiles have data but no metadata."
+            " Please delete these tiles from the database before continuing: %s",
+            len(wrong),
+            ", ".join(wrong),
         )
         exit(1)
 
     missing_tiles = [x for x in required_tiles if x not in existing_tiles]
     relevant_md_tiles = {x for x in existing_md if x in required_tiles}
     relevant_data_tiles = {x for x in existing_tiles if x in required_tiles}
-    # fmt: off
-    print(f"\t{len(required_tiles)} tiles in the region.")
-    print(f"\t{len(relevant_md_tiles)} metadata tiles in the database for this region.")
-    print(f"\t{len(relevant_data_tiles)} tiles already exist in the database for this region.")
-    print(f"\tPlanning to add metadata for {len(required_tiles) - len(relevant_md_tiles)} new tiles.")
-    print(f"\t(Which should match this number: {tile_granule_gdf.tile_id.nunique()})")
-    print(f"\tPlanning to create jobs to process data for {len(missing_tiles)} tiles.")
-    # fmt: on
+    logger.info("%d tiles in the region.", len(required_tiles))
+    logger.info("%d metadata tiles in the database for this region.", len(relevant_md_tiles))
+    logger.info("%d tiles already exist in the database for this region.", len(relevant_data_tiles))
+    logger.info("Planning to add metadata for %d new tiles.", len(required_tiles) - len(relevant_md_tiles))
+    logger.info("(Which should match this number: %d)", tile_granule_gdf.tile_id.nunique())
+    logger.info("Planning to create jobs to process data for %d tiles.", len(missing_tiles))
 
     if args.dry_run:
         return
@@ -156,7 +159,7 @@ def main(args):
     if len(tile_granule_gdf) > 0:
         if not args.no_confirm:
             input("To proceed to create tile metadata, press ENTER >>>")
-        print("Writing metadata for required tiles to S3...")
+        logger.info("Writing metadata for required tiles to S3...")
 
         ducky.gdf_to_duck(
             con,
@@ -178,9 +181,7 @@ def main(args):
         with open(logfile, "w") as f:
             for tile_id in sorted(missing_tiles):
                 f.write(f"{tile_id}\n")
-        print(
-            f"Proposed metadata for tiles listed in {logfile} written to database."
-        )
+        logger.info("Proposed metadata for tiles listed in %s written to database.", logfile)
     if not args.no_confirm:
         input("To proceed to create jobs, press ENTER >>>")
 
@@ -192,13 +193,13 @@ def main(args):
     for i in range(0, len(missing_tiles), 50):
         batch = missing_tiles[i : i + 50]
         for tile_id in batch:
-            print(f"Submitting job for tile {tile_id}...")
+            logger.info("Submitting job for tile %s...", tile_id)
             job_name = f"tiler_{args.job_code}_{args.job_iteration}"
             queue = get_queue(tile_id)
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
-                version="amelia-deploy-5TNH7WSm",
+                version="amelia-deploy-yfpetMPn",
                 queue=queue,
                 bucket=args.bucket,
                 prefix=args.prefix,
@@ -213,6 +214,12 @@ def main(args):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
+    )
     parser = argparse.ArgumentParser(
         description="Manage MAAP jobs to create a tiled GEDI database."
     )

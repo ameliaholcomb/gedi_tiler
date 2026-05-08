@@ -1,9 +1,12 @@
 from maap.maap import MAAP
 import enum
+import logging
 import pandas as pd
 import time
 from tqdm import tqdm
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 class JobStatus(enum.Enum):
@@ -98,7 +101,7 @@ class JobsManager:
 
     def submit_new_jobs(self):
         for i, tile_id in enumerate(self.get_unstarted_tiles()):
-            print(f"Submitting job for tile {tile_id}...")
+            logger.info("Submitting job for tile %s...", tile_id)
             job_name = f"{self.jobs_name}_{tile_id}"
             if (
                 "N50" in tile_id
