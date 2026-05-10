@@ -7,12 +7,16 @@ distance of each other, with support for user-supplied filters and data columns.
 import argparse
 import h3
 import geopandas as gpd
+import logging
 import os
+import sys
 from maap.maap import MAAP
 from typing import List, Optional, Union
 
 from gtiler.database import ducky
 from gtiler.database.query_lib import crossovers
+
+logger = logging.getLogger(__name__)
 
 def main(args):
     shape = gpd.read_file(args.shapefile).to_crs("EPSG:4326")
@@ -35,7 +39,7 @@ def main(args):
         args.filters,
         args.columns
     )
-    print(f"Found {len(res)} repeat footprint pairs.")
+    logger.info("Found %d repeat footprint pairs.", len(res))
 
     res.to_parquet(args.outfile, index=False)
 
@@ -73,6 +77,12 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="Path in which to store repeat footprints data"
+    )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
     )
     args = parser.parse_args()
     main(args)

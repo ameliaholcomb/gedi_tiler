@@ -1,13 +1,17 @@
 import argparse
 import geopandas as gpd
+import logging
 import os
 import pandas as pd
+import sys
 
 from gtiler.common.granule_metadata import get_granule_metadata
 
 from gtiler.common import shape_parser, s3_utils
 from gtiler.database import ducky, tiles
 from gtiler.database.schema import GediProduct
+
+logger = logging.getLogger(__name__)
 
 
 def main(args):
@@ -34,7 +38,7 @@ def main(args):
     ducky.gdf_to_duck(con, tile_granule_gdf, "cmr_md")
 
     # 2. Get the existing metadata from the database
-    print("Scanning existing metadata ...")
+    logger.info("Scanning existing metadata ...")
     path = ducky.metadata_prefix(args.bucket, args.prefix)
     if s3_utils.s3_prefix_exists(path):
         md_spec = ducky.metadata_spec(args.bucket, args.prefix)
@@ -43,7 +47,7 @@ def main(args):
                     SELECT * FROM read_parquet('{md_spec}')
                     """)
     # Confirm that existing_md is well-formed, i.e., has no duplicate granules
-    print("Checking validity of existing metadata ...")
+    logger.info("Checking validity of existing metadata ...")
     duplicates = con.sql("""--sql
         SELECT COUNT(*),
         FROM read_parquet('{md_spec}')
@@ -52,11 +56,11 @@ def main(args):
     """)
     n = con.sql("SELECT COUNT(*) FROM duplicates").fetchone()[0]
     if n > 0:
-        print(f"Error: {n} duplicate granules found in existing metadata.")
-        print(con.sql("SELECT * FROM duplicates"))
+        logger.error("Error: %d duplicate granules found in existing metadata.", n)
+        logger.error("%s", con.sql("SELECT * FROM duplicates"))
         raise ValueError()
     # Confirm that all tiles for region are present in existing_md
-    print("Checking that all tiles in region are present in the database ...")
+    logger.info("Checking that all tiles in region are present in the database ...")
     existing_tiles = con.sql("""--sql
         SELECT DISTINCT tile_id
         FROM existing_md
@@ -69,7 +73,7 @@ def main(args):
         )
     
     # 3. Identify missing granules in each tile_id
-    print("Checking for missing and out-of-date granules ...")
+    logger.info("Checking for missing and out-of-date granules ...")
     # First, confirm that no existing granules have mismatched hashes
     mismatched = con.sql("""--sql
         SELECT
@@ -84,8 +88,8 @@ def main(args):
     """)
     n = con.sql("SELECT COUNT(*) FROM mismatched").fetchone()[0]
     if n > 0:
-        print(f"Error: {n} mismatched granule hashes found in tiles:")
-        print(con.sql("SELECT DISTINCT tile_id FROM mismatched"))
+        logger.error("Error: %d mismatched granule hashes found in tiles:", n)
+        logger.error("%s", con.sql("SELECT DISTINCT tile_id FROM mismatched"))
         # TODO(amelia): Instead of raising an error, optionally 
         # remove these tiles and re-download them.
         raise ValueError()
@@ -117,6 +121,12 @@ def main(args):
         fs.mv(tile_dir, tile_updates_dir)
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
+    )
     parser = argparse.ArgumentParser(
         description="Update tiles in the tiled GEDI database on MAAP."
     )

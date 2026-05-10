@@ -1,5 +1,8 @@
 import boto3
 import fsspec
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class RefreshableFSSpec:
@@ -10,24 +13,29 @@ class RefreshableFSSpec:
 
     def refresh(self):
         self.credentials = self.assume_role_credentials(self.ssm_parameter_name)
+        old_fs = self.fs
+        try:
+            old_fs.close()
+        except Exception:
+            pass
         self.fs = self.fsspec_access(self.credentials)
 
     def get_fs(self):
         return self.fs
 
     def assume_role_credentials(self, ssm_parameter_name):
-        print("Assuming role to access S3...")
+        logger.info("Assuming role to access S3...")
         # Create a session using the default personal credentials
         session = boto3.Session()
 
-        print("Retrieving SSM parameter for role ARN...")
+        logger.info("Retrieving SSM parameter for role ARN...")
         # Retrieve the SSM parameter
         ssm = session.client("ssm", "us-west-2")
         parameter = ssm.get_parameter(
             Name=ssm_parameter_name, WithDecryption=True
         )
         parameter_value = parameter["Parameter"]["Value"]
-        print(f"Assuming role: {parameter_value}")
+        logger.info("Assuming role: %s", parameter_value)
 
         # Assume the DAAC access role
         sts = session.client("sts")
@@ -39,7 +47,7 @@ class RefreshableFSSpec:
         # From the response that contains the assumed role, get the temporary
         # credentials that can be used to make subsequent API calls
         credentials = assumed_role_object["Credentials"]
-        print("Role assumed, temporary credentials obtained.")
+        logger.info("Role assumed, temporary credentials obtained.")
 
         return credentials
 
@@ -55,6 +63,11 @@ class RefreshableFSSpec:
             secret=credentials["SecretAccessKey"],
             token=credentials["SessionToken"],
             requester_pays=True,
+            config_kwargs={
+                "read_timeout": 120,
+                "connect_timeout": 10,
+                "retries": {"max_attempts": 3, "mode": "adaptive"},
+            },
             **fsspec_kwargs,
         )
 
@@ -72,7 +85,12 @@ def s3_prefix_exists(s3_path: str) -> bool:
 
 
 def conditional_multipart_put(
-    bucket: str, key: str, data: bytes, *, if_match: str = None, if_none_match: str = None
+    bucket: str,
+    key: str,
+    data: bytes,
+    *,
+    if_match: str = None,
+    if_none_match: str = None,
 ) -> str:
     """Upload bytes to S3 using multipart upload with a conditional write.
 
@@ -122,5 +140,7 @@ def conditional_multipart_put(
         return response["ETag"]
 
     except Exception:
-        s3_client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        s3_client.abort_multipart_upload(
+            Bucket=bucket, Key=key, UploadId=upload_id
+        )
         raise

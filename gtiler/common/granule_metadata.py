@@ -1,12 +1,15 @@
 import datetime as dt
 import hashlib
 import geopandas as gpd
+import logging
 import pandas as pd
 
 from typing import List, Optional
 
 from gtiler.common import cmr_query, granule_name
 from gtiler.database.schema import GediProduct
+
+logger = logging.getLogger(__name__)
 
 
 def get_granule_key_for_filename(filename: str) -> str:
@@ -27,7 +30,7 @@ def get_granule_metadata(
 ) -> gpd.GeoDataFrame:
     md_list = []
     for product in products:
-        print("\tQuerying NASA metadata API for product: ", product.value)
+        logger.info("Querying NASA metadata API for product: %s", product.value)
         date_range = None
         if start_year is not None and end_year is not None:
             date_range = (
@@ -40,7 +43,7 @@ def get_granule_metadata(
         df["granule_key"] = df.granule_name.map(get_granule_key_for_filename)
         df["product"] = product.value
         df.rename(columns={"granule_url": f"{product.value}_url"}, inplace=True)
-        print(f"\tFound {len(df)} granules for product {product.value}.")
+        logger.info("Found %d granules for product %s.", len(df), product.value)
         md_list.append(df)
     md = gpd.GeoDataFrame(
         pd.concat(md_list), geometry="granule_poly"
@@ -49,9 +52,7 @@ def get_granule_metadata(
     # Filter out granules with that do not have each required product.
     nprod = md.groupby("granule_key")["product"].nunique()
     omit = nprod[nprod != len(products)].index
-    print(
-        f"Excluding {len(omit)}/{len(nprod)} granules with incomplete product sets."
-    )
+    logger.info("Excluding %d/%d granules with incomplete product sets.", len(omit), len(nprod))
     md = md[~md.granule_key.isin(omit)].reset_index(drop=True)
     md.drop(columns=["product"], inplace=True)
     md = md.groupby(["granule_key"]).agg(
