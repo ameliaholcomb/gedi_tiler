@@ -1,11 +1,11 @@
 import argparse
-import boto3
+from botocore.exceptions import ReadTimeoutError, ConnectTimeoutError
 import h5py
 import geopandas as gpd
 import logging
 import numpy as np
 import pandas as pd
-import pickle
+import psutil
 import sys
 from typing import List, Tuple
 
@@ -134,7 +134,7 @@ def load_granule_product(
     s3url: str,
     product: Product,
     tile: Tile,
-    retry_count: int = 1,
+    retry_count: int = 3,
 ) -> pd.DataFrame:
     """Load a GEDI HDF5 file and return a flattened dataframe.
     Args:
@@ -173,6 +173,19 @@ def load_granule_product(
                 dfs = pd.DataFrame(dfs)
                 dfs["beam_name"] = k
                 full_df.append(dfs)
+    except (ReadTimeoutError, ConnectTimeoutError) as e:
+        logger.warning(f"Timeout reading {s3url}: {e}")
+        if retry_count <= 0:
+            logger.error(
+                f"Timeout reading {s3url} after all retries, giving up."
+            )
+            raise
+        wait = 4 ** (3 - retry_count)  # 4s, 16s, 64s backoff
+        logger.warning(
+            f"Timeout reading {s3url}, retrying in {wait}s ({retry_count} attempts left)..."
+        )
+        time.sleep(wait)
+        return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
     except Exception as e:
         if retry_count <= 0:
             raise e
@@ -205,7 +218,9 @@ def load_granule(
     """
     dfs = []
     for product_schema, s3url in product_files:
-        logger.debug("Reading product %s from %s", product_schema.product_level, s3url)
+        logger.debug(
+            "Reading product %s from %s", product_schema.product_level, s3url
+        )
         df = load_granule_product(rfs, s3url, product_schema, tile)
         if len(df) == 0:
             return pd.DataFrame({})
@@ -218,6 +233,7 @@ def load_granule(
             inplace=True,
         )  # expected repeated cols -- keep from first product only
         full_df = full_df.join(df, how="inner")
+    log_memory(logger, "load_granule after join")
 
     # Add derived data columns
     full_df["granule"] = granule
@@ -240,7 +256,6 @@ def load_granule(
     return full_df
 
 
-
 def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
     """Load metadata for a specific tile from S3.
     Args:
@@ -255,6 +270,12 @@ def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
     return gpd.read_file(md_spec)
 
 
+def log_memory(logger, message=""):
+    """Log the current memory usage."""
+    mem_usage_gb = psutil.Process().memory_info().rss / 1024**3
+    logger.info(f"Current memory usage: {mem_usage_gb:.2f} GB {message}")
+
+
 def run_main(args: argparse.Namespace):
     """Main function to create a tile."""
     t1 = time.time()
@@ -262,22 +283,29 @@ def run_main(args: argparse.Namespace):
     # Load metadata for the tile
     logger.info("Reading metadata and checkpoints for tile ...")
     checkpointer = checkpoint_lib.Checkpointer(
-        args.bucket, args.prefix, args.tile_id, generation=args.generation)
+        args.bucket, args.prefix, args.tile_id, generation=args.generation
+    )
     initial_checkpoint = checkpointer.initialize()
     if initial_checkpoint is None:
         logger.info("Loading new work plan from metadata ...")
-        granules_to_process = load_tile_metadata(args.tile_id, args.bucket, args.prefix)
+        granules_to_process = load_tile_metadata(
+            args.tile_id, args.bucket, args.prefix
+        )
         processed_data = pd.DataFrame()
     else:
         granules_to_process, processed_data = initial_checkpoint
     if args.test:
         tot = len(granules_to_process)
         granules_to_process = granules_to_process.head(2)
-        logger.info("Testing mode: using %d/%d granules.", len(granules_to_process), tot)
+        logger.info(
+            "Testing mode: using %d/%d granules.", len(granules_to_process), tot
+        )
 
     t2 = time.time()
     logger.info("%d shots already processed.", len(processed_data))
-    logger.info("Planning to process %d new granules.", len(granules_to_process))
+    logger.info(
+        "Planning to process %d new granules.", len(granules_to_process)
+    )
     logger.info("Loading metadata and checkpoints took %.1f seconds.", t2 - t1)
 
     # Set up access to the ORNL and LP DAACs
@@ -301,8 +329,9 @@ def run_main(args: argparse.Namespace):
                 tile=args.tile,
                 qf=args.quality,
             )
-            logger.info("Loaded %d shots from granule %s.", len(df), row.granule_key)
+            logger.info(f"Loaded {len(df)} shots in granule {row.granule_key}")
             dfs.append(df)
+        log_memory(logger, "after processing batch")
         checkpointer.write_checkpoint(
             granules_to_process=granules_to_process.iloc[i + batch_size :],
             processed_data=pd.concat(dfs),

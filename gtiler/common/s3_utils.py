@@ -13,6 +13,11 @@ class RefreshableFSSpec:
 
     def refresh(self):
         self.credentials = self.assume_role_credentials(self.ssm_parameter_name)
+        old_fs = self.fs
+        try:
+            old_fs.close()
+        except Exception:
+            pass
         self.fs = self.fsspec_access(self.credentials)
 
     def get_fs(self):
@@ -58,6 +63,11 @@ class RefreshableFSSpec:
             secret=credentials["SecretAccessKey"],
             token=credentials["SessionToken"],
             requester_pays=True,
+            config_kwargs={
+                "read_timeout": 120,
+                "connect_timeout": 10,
+                "retries": {"max_attempts": 3, "mode": "adaptive"},
+            },
             **fsspec_kwargs,
         )
 
@@ -75,7 +85,12 @@ def s3_prefix_exists(s3_path: str) -> bool:
 
 
 def conditional_multipart_put(
-    bucket: str, key: str, data: bytes, *, if_match: str = None, if_none_match: str = None
+    bucket: str,
+    key: str,
+    data: bytes,
+    *,
+    if_match: str = None,
+    if_none_match: str = None,
 ) -> str:
     """Upload bytes to S3 using multipart upload with a conditional write.
 
@@ -125,5 +140,7 @@ def conditional_multipart_put(
         return response["ETag"]
 
     except Exception:
-        s3_client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        s3_client.abort_multipart_upload(
+            Bucket=bucket, Key=key, UploadId=upload_id
+        )
         raise

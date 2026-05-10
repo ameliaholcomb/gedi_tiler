@@ -49,7 +49,7 @@ class Checkpointer:
         if s3_utils.s3_prefix_exists(checkpoint_url):
             logger.info("Restoring from checkpoint ...")
             checkpoint = self.read_checkpoint()
-            logger.debug("%s", checkpoint)
+            logger.info("%s", checkpoint)
             # immediately try to write the checkpoint back to claim ownership
             # of this generation
             self.write_checkpoint(
@@ -94,7 +94,7 @@ class Checkpointer:
             granules_to_process=granules_to_process,
             processed_data=processed_data,
         )
-        logger.debug("Writing checkpoint: %s", checkpoint)
+        logger.info("Writing checkpoint: %s", checkpoint)
         try:
             if self.etag is None:  # First write, no existing checkpoint
                 self.etag = s3_utils.conditional_multipart_put(
