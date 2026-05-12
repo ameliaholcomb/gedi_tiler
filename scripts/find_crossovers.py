@@ -4,6 +4,7 @@ Module for finding repeat GEDI footprints (crossovers) using H3 spatial indexing
 Provides functionality to identify pairs of GEDI shots that are within a specified
 distance of each other, with support for user-supplied filters and data columns.
 """
+
 import argparse
 import h3
 import geopandas as gpd
@@ -18,6 +19,7 @@ from gtiler.database.query_lib import crossovers
 
 logger = logging.getLogger(__name__)
 
+
 def main(args):
     shape = gpd.read_file(args.shapefile).to_crs("EPSG:4326")
     if len(shape) > 1:
@@ -25,23 +27,21 @@ def main(args):
     geom = shape.geometry.values[0]
 
     maap = MAAP()
-    username = maap.profile.account_info()['username']
+    username = maap.profile.account_info()["username"]
     temp_dir = "/.tmp/duckdb_tmp"
     os.makedirs(temp_dir, exist_ok=True)
     con = ducky.init_duckdb(temp_dir)
-    data_spec = ducky.brazil_data_spec()
+    data_spec = ducky.data_spec(
+        "maap-ops-workspace", "shared/ameliah/tiled_gedi"
+    )
 
     res = crossovers.find_repeat_footprints(
-        con,
-        data_spec,
-        geom,
-        args.distance_m,
-        args.filters,
-        args.columns
+        con, data_spec, geom, args.distance_m, args.filters, args.columns
     )
     logger.info("Found %d repeat footprint pairs.", len(res))
 
     res.to_parquet(args.outfile, index=False)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -58,25 +58,25 @@ if __name__ == "__main__":
         type=int,
         required=True,
         default=40,
-        help="Maximum distance in meters for repeat footprints."
+        help="Maximum distance in meters for repeat footprints.",
     )
     # repeat list of columns
     parser.add_argument(
         "--columns",
-        nargs='*',
+        nargs="*",
         help="List of columns to include in the output data. Shot number, latitude, longitude, and metric distance between footprints are always included.",
     )
     parser.add_argument(
         "--filters",
         type=str,
         required=False,
-        help="String of quality filters, e.g.\n'l4_quality_flag = 1 AND sensitivity > 0.95'"
+        help="String of quality filters, e.g.\n'l4_quality_flag = 1 AND sensitivity > 0.95'",
     )
     parser.add_argument(
         "--outfile",
         type=str,
         required=True,
-        help="Path in which to store repeat footprints data"
+        help="Path in which to store repeat footprints data",
     )
     logging.basicConfig(
         level=logging.INFO,
