@@ -96,6 +96,13 @@ def get_cmd_args():
         action="store_true",
         help="Apply quality filters to the data.",
     )
+    p.add_argument(
+        "-v",
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        help="Enable DEBUG-level logging (default is INFO).",
+    )
     cmdargs = p.parse_args()
     return cmdargs
 
@@ -430,12 +437,12 @@ def run_main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
+    args = get_cmd_args()
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stderr,
     )
-    args = get_cmd_args()
     args = check_args(args)
     run_main(args)

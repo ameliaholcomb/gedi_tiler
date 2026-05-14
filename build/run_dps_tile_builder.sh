@@ -38,6 +38,11 @@ if [ -n "$7" ]; then
 else
     quality=""
 fi
+if [ -n "${8:-}" ]; then
+    verbose="--verbose"
+else
+    verbose=""
+fi
 
 # Call the script using the absolute paths
 # Use the updated environment when calling 'conda run'
@@ -45,4 +50,4 @@ fi
 # Any output written to the stdout and stderr streams will be
 # automatically captured and placed in the output dir
 
-conda run --live-stream --name pyduck python ${basedir}/../scripts/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --generation ${generation} --checkpoint_interval ${checkpoint_interval} ${test} ${quality}
+conda run --live-stream --name pyduck python ${basedir}/../scripts/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --generation ${generation} --checkpoint_interval ${checkpoint_interval} ${test} ${quality} ${verbose}
