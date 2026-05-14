@@ -99,29 +99,44 @@ def args(tmp_path):
 
 
 @pytest.fixture
-def run_pipeline(dps_tile_builder, args, fixture_metadata, tmp_path):
-    """Execute run_main against the fixture metadata, writing to tmp_path.
+def run_pipeline_factory(dps_tile_builder, args, tmp_path):
+    """Returns a callable: run_pipeline_factory(metadata, subdir=None) -> output_dir.
 
     Patches:
-      - load_tile_metadata → return the fixture GeoDataFrame directly
-        (avoids the s3://bucket/prefix/metadata/... path construction)
+      - load_tile_metadata → return the given metadata GeoDataFrame
       - s3_utils.RefreshableFSSpec → local fsspec filesystem so the
         fixture's file:// granule URLs are read from disk, not S3
       - ducky.data_prefix → local tmp_path (DuckDB COPY writes to disk)
       - checkpoint_lib.Checkpointer → no-op (bypasses S3 checkpoint state)
+
+    Pass `subdir` to isolate two runs in the same test (e.g. to compare
+    schemas across tiles); without it, the output lands directly under
+    `tmp_path` so single-run tests don't need a subdir parameter.
     """
-    local_prefix = str(tmp_path) + "/"
-    with patch.object(
-        dps_tile_builder, "load_tile_metadata", return_value=fixture_metadata
-    ), patch.object(
-        dps_tile_builder.s3_utils, "RefreshableFSSpec", _LocalFSSpec
-    ), patch.object(
-        dps_tile_builder.ducky, "data_prefix", return_value=local_prefix
-    ), patch.object(
-        dps_tile_builder.checkpoint_lib, "Checkpointer", _NullCheckpointer
-    ):
-        dps_tile_builder.run_main(args)
-    return pathlib.Path(local_prefix)
+
+    def _run(metadata, subdir=None):
+        out_dir = tmp_path / subdir if subdir else tmp_path
+        out_dir.mkdir(parents=True, exist_ok=True)
+        local_prefix = str(out_dir) + "/"
+        with patch.object(
+            dps_tile_builder, "load_tile_metadata", return_value=metadata
+        ), patch.object(
+            dps_tile_builder.s3_utils, "RefreshableFSSpec", _LocalFSSpec
+        ), patch.object(
+            dps_tile_builder.ducky, "data_prefix", return_value=local_prefix
+        ), patch.object(
+            dps_tile_builder.checkpoint_lib, "Checkpointer", _NullCheckpointer
+        ):
+            dps_tile_builder.run_main(args)
+        return out_dir
+
+    return _run
+
+
+@pytest.fixture
+def run_pipeline(run_pipeline_factory, fixture_metadata):
+    """Default pipeline run against the unmodified fixture metadata."""
+    return run_pipeline_factory(fixture_metadata)
 
 
 def _parquet_glob(out_dir: pathlib.Path) -> str:
@@ -209,3 +224,148 @@ class TestRunMain:
             f"unexpected granule keys in output: {granules - expected}"
         )
         assert granules, "no granule values in output"
+
+
+def _read_output(out_dir: pathlib.Path) -> pd.DataFrame:
+    """Concat every output parquet file into a single DataFrame.
+    PARTITION_BY strips tile_id and year from the parquet bodies — they
+    live only in directory names and aren't needed here."""
+    files = list((out_dir / f"tile_id={TILE_ID}").glob("year=*/*.parquet"))
+    assert files, f"no output parquet files under {out_dir}"
+    return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+
+class TestMissingProductUrl:
+    """When a granule's metadata row has a null product URL, the pipeline
+    still produces the tile but with NaN-filled columns for that product,
+    and quality filtering is disabled tile-wide.
+
+    The fixture h5 files have the first 5 shots/beam patched to fail every
+    QF criterion (see build_granule_fixtures.QUALITY_PATTERN) and the rest
+    patched to pass; that lets these tests verify the QF behavior by
+    counting low-quality survivors in the output.
+    """
+
+    @pytest.fixture
+    def metadata_missing_l4c(self, fixture_metadata):
+        """First granule has no L4C URL; second granule is unchanged."""
+        md = fixture_metadata.copy()
+        md.loc[md.index[0], "level4C_url"] = None
+        return md
+
+    @pytest.fixture
+    def out_dir(self, run_pipeline_factory, metadata_missing_l4c):
+        return run_pipeline_factory(metadata_missing_l4c)
+
+    def test_tile_still_produced(self, out_dir):
+        assert (out_dir / f"tile_id={TILE_ID}").is_dir()
+        files = list((out_dir / f"tile_id={TILE_ID}").glob("year=*/*.parquet"))
+        assert files, "expected parquet output despite missing L4C URL"
+
+    def test_both_granules_present_in_output(
+        self, out_dir, metadata_missing_l4c
+    ):
+        df = _read_output(out_dir)
+        assert set(df["granule"].unique()) == set(
+            metadata_missing_l4c["granule_key"]
+        )
+
+    def test_l4c_columns_null_only_for_missing_granule(
+        self, out_dir, metadata_missing_l4c
+    ):
+        df = _read_output(out_dir)
+        missing_key = metadata_missing_l4c.iloc[0]["granule_key"]
+        present_key = metadata_missing_l4c.iloc[1]["granule_key"]
+        missing_df = df[df["granule"] == missing_key]
+        present_df = df[df["granule"] == present_key]
+        assert len(missing_df) > 0 and len(present_df) > 0
+
+        # Spot-check one scalar and one quality-flag column from L4C.
+        for col in ("wsci", "wsci_quality_flag"):
+            assert missing_df[col].isna().all(), (
+                f"{col} should be all-NaN for the granule with no L4C URL"
+            )
+            assert present_df[col].notna().any(), (
+                f"{col} should have real values for the unaffected granule"
+            )
+
+    def test_l2a_columns_unaffected_for_both_granules(self, out_dir):
+        # L2A is still present for both granules — its columns should
+        # contain real values everywhere.
+        df = _read_output(out_dir)
+        for col in ("elev_lowestmode", "shot_number", "lat_lowestmode"):
+            assert df[col].notna().all(), f"{col} should have no NaNs"
+
+    def test_quality_filter_disabled_when_url_missing(
+        self, args, run_pipeline_factory, metadata_missing_l4c
+    ):
+        # The fixture's first 5 shots/beam have quality_flag == 0 (and
+        # other QF criteria set to fail). With args.quality=True but a
+        # missing L4C URL, QF is disabled tile-wide, so those shots must
+        # survive in the output.
+        args.quality = True
+        out = run_pipeline_factory(metadata_missing_l4c)
+        df = _read_output(out)
+        n_low = int((df["quality_flag"] == 0).sum())
+        assert n_low > 0, (
+            "low-quality footprints should survive when QF is disabled "
+            "tile-wide due to a missing product URL"
+        )
+
+    def test_quality_filter_active_when_no_url_missing(
+        self, args, run_pipeline_factory, fixture_metadata
+    ):
+        # Counterpart: with all URLs present and args.quality=True, the
+        # same low-quality footprints (quality_flag == 0) must be filtered
+        # out, while the high-quality footprints survive.
+        args.quality = True
+        out = run_pipeline_factory(fixture_metadata)
+        df = _read_output(out)
+        n_low = int((df["quality_flag"] == 0).sum())
+        assert n_low == 0, (
+            "low-quality footprints should be filtered out when QF is "
+            "active and no product URLs are missing"
+        )
+        assert len(df) > 0, (
+            "expected the high-quality footprints (quality_flag == 1) to "
+            "survive QF"
+        )
+
+    def test_outputs_with_and_without_null_url_share_schema(
+        self, run_pipeline_factory, fixture_metadata, metadata_missing_l4c
+    ):
+        """Outputs from a tile with a null product URL and a tile without
+        one must be parquet-schema-compatible: a single DuckDB read
+        across both must succeed and return the union of their rows."""
+        out_full = run_pipeline_factory(fixture_metadata, subdir="full")
+        out_missing = run_pipeline_factory(
+            metadata_missing_l4c, subdir="missing"
+        )
+
+        con = duckdb.connect()
+        df = con.sql(f"""
+            SELECT * FROM read_parquet([
+                '{out_full}/tile_id={TILE_ID}/year=*/*.parquet',
+                '{out_missing}/tile_id={TILE_ID}/year=*/*.parquet'
+            ])
+        """).df()
+
+        n_full = len(_read_output(out_full))
+        n_missing = len(_read_output(out_missing))
+        assert len(df) == n_full + n_missing, (
+            f"single-read row count {len(df)} != "
+            f"sum of per-tile counts ({n_full} + {n_missing})"
+        )
+
+        # Spot-check that columns from every product survived the unified
+        # read — including L4C, which is NaN-filled in one of the two
+        # inputs.
+        for col in (
+            "elev_lowestmode",  # L2A
+            "cover",            # L2B
+            "agbd",             # L4A
+            "wsci",             # L4C
+            "wsci_quality_flag",
+            "granule",
+        ):
+            assert col in df.columns, f"{col} missing from unified read"

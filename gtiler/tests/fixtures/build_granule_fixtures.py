@@ -26,12 +26,43 @@ from gtiler.database.tiles import Tile  # noqa: E402
 FIXTURES = pathlib.Path(__file__).parent
 TILE_ID = "N00_W050"
 N_SHOTS_PER_BEAM = 20  # keep tiny but enough to survive quality filters
+N_LOW_QUALITY_PER_BEAM = 5  # first N shots/beam patched to fail QF
 
 PRODUCT_BY_LEVEL = {
     "level2A": SCHEMA.products[0],
     "level2B": SCHEMA.products[1],
     "level4A": SCHEMA.products[2],
     "level4C": SCHEMA.products[3],
+}
+
+# Quality-flag patching pattern. For each per-beam dataset, the first
+# N_LOW_QUALITY_PER_BEAM shots get the "fail" value and the rest get the
+# "pass" value. This lets the missing-product test verify that disabling
+# QF tile-wide actually preserves low-quality footprints.
+#
+# The L2A entries cover every column the run_main quality filter reads
+# (quality_flag, sensitivity, sensitivity_a2, degrade_flag, surface_flag);
+# the other levels set their respective product quality flags so that
+# any future cross-product QF logic has consistent fixture state.
+QUALITY_PATTERN = {
+    "level2A": [
+        ("quality_flag", 0, 1),
+        ("sensitivity", 0.5, 0.95),
+        ("geolocation/sensitivity_a2", 0.5, 0.98),
+        ("degrade_flag", 1, 0),  # 0 ∈ QDEGRADE; 1 ∉ QDEGRADE
+        ("surface_flag", 0, 1),
+    ],
+    "level2B": [
+        ("l2a_quality_flag", 0, 1),
+        ("l2b_quality_flag", 0, 1),
+    ],
+    "level4A": [
+        ("l2_quality_flag", 0, 1),
+        ("l4_quality_flag", 0, 1),
+    ],
+    "level4C": [
+        ("wsci_quality_flag", 0, 1),
+    ],
 }
 
 
@@ -88,6 +119,21 @@ def _write_subset(
         ds = dst_beam.create_dataset(path, data=data)
         _copy_attrs(src, ds)
     _copy_attrs(src_beam, dst_beam)
+
+
+def patch_quality_flags(local_path: pathlib.Path, level: str, n_low: int):
+    """In-place: set the first n_low shots/beam to QF-fail values and
+    the rest to QF-pass values, per QUALITY_PATTERN[level]."""
+    with h5py.File(local_path, "r+") as f:
+        for beam in [k for k in f.keys() if k.startswith("BEAM")]:
+            for sds, fail_v, pass_v in QUALITY_PATTERN[level]:
+                if sds not in f[beam]:
+                    continue
+                ds = f[f"{beam}/{sds}"]
+                n = ds.shape[0]
+                vals = np.full(n, pass_v, dtype=ds.dtype)
+                vals[:n_low] = fail_v
+                ds[...] = vals
 
 
 def build_mini_granule(
@@ -162,6 +208,9 @@ def main():
             tile=tile,
         )
         for level, path in local.items():
+            patch_quality_flags(
+                pathlib.Path(path), level, N_LOW_QUALITY_PER_BEAM
+            )
             new_rows.at[i, f"{level}_url"] = f"file://{path}"
 
     new_rows.to_parquet(metadata_path)

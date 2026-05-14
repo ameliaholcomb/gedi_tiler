@@ -202,6 +202,22 @@ def load_granule_product(
     return full_df.dropna().set_index("shot_number")
 
 
+def expected_variable_columns(product: Product) -> List[str]:
+    """Return the dataframe column names that load_granule_product
+    produces from `product.variables` — expanding profile columns into
+    `<name>_<bin>`. Excludes shot_number and geometry, which come from
+    the first available product."""
+    cols: List[str] = []
+    for v in product.variables:
+        if "ancillary" in v.SDS_Name.lower():
+            cols.append(v.variable)
+        elif v.is_profile:
+            cols.extend(f"{v.variable}_{i}" for i in range(v.n_bins))
+        else:
+            cols.append(v.variable)
+    return cols
+
+
 def load_granule(
     rfs: s3_utils.RefreshableFSSpec,
     granule: str,
@@ -212,12 +228,37 @@ def load_granule(
     """Load dataframes for all products and join into a single geodataframe.
     Args:
         granule: Granule name (e.g. OrbitID_GranuleID)
-        product_files: List of tuples of the form (product, s3url)
-            e.g. [("level4A", "s3://..."), ("level2B", "s3://...")]
-        schema: Dictionary defining the data schema for each product.
+        product_files: List of tuples of the form (product, s3url). A
+            null s3url (None/NaN) marks the product as missing for this
+            granule: the file is not read, and its schema-expanded
+            columns are NaN-filled instead.
+        qf: Apply L2A quality filters. Callers should pass False when
+            any product is missing for this granule, since the filter
+            columns may not all be present (run_main disables qf
+            tile-wide when any granule has missing URLs).
     """
-    dfs = []
+    available: List[Tuple[Product, str]] = []
+    missing: List[Product] = []
     for product_schema, s3url in product_files:
+        if s3url is None or pd.isna(s3url):
+            missing.append(product_schema)
+        else:
+            available.append((product_schema, s3url))
+
+    if not available:
+        logger.warning("No product URLs available for granule %s", granule)
+        return pd.DataFrame({})
+
+    if missing:
+        logger.info(
+            "Granule %s missing %d product(s): %s",
+            granule,
+            len(missing),
+            [p.product_level.value for p in missing],
+        )
+
+    dfs = []
+    for product_schema, s3url in available:
         logger.debug(
             "Reading product %s from %s", product_schema.product_level, s3url
         )
@@ -231,9 +272,14 @@ def load_granule(
         df.drop(
             columns=["beam_name", "lon_lowestmode", "lat_lowestmode"],
             inplace=True,
-        )  # expected repeated cols -- keep from first product only
+        )
         full_df = full_df.join(df, how="inner")
     log_memory(logger, "load_granule after join")
+
+    # NaN-fill columns for products with null URLs in the metadata.
+    for product_schema in missing:
+        for col in expected_variable_columns(product_schema):
+            full_df[col] = np.nan
 
     # Add derived data columns
     full_df["granule"] = granule
@@ -308,6 +354,23 @@ def run_main(args: argparse.Namespace):
     )
     logger.info("Loading metadata and checkpoints took %.1f seconds.", t2 - t1)
 
+    # Quality filtering reads columns from across the joined products, so
+    # if any granule in this tile is missing a product URL we disable QF
+    # tile-wide rather than try to filter rows that have NaN-filled cols.
+    url_cols = ["level2A_url", "level2B_url", "level4A_url", "level4C_url"]
+    has_missing_urls = (
+        granules_to_process[url_cols].isna().any().any()
+        if len(granules_to_process)
+        else False
+    )
+    qf = args.quality and not has_missing_urls
+    if args.quality and has_missing_urls:
+        logger.warning(
+            "Tile %s has granules with missing product URLs; "
+            "disabling quality filtering for the whole tile.",
+            args.tile_id,
+        )
+
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
 
@@ -327,7 +390,7 @@ def run_main(args: argparse.Namespace):
                     (SCHEMA.products[3], row.level4C_url),
                 ],
                 tile=args.tile,
-                qf=args.quality,
+                qf=qf,
             )
             logger.info(f"Loaded {len(df)} shots in granule {row.granule_key}")
             dfs.append(df)
