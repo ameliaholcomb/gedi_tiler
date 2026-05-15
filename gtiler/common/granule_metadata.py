@@ -27,7 +27,21 @@ def get_granule_metadata(
     products: List[GediProduct],
     start_year: Optional[int] = None,
     end_year: Optional[int] = None,
+    required_products: Optional[List[GediProduct]] = None,
 ) -> gpd.GeoDataFrame:
+    """Query CMR for every product in `products` and join the results by
+    granule_key. A granule is included if every product in
+    `required_products` (defaults to `products`) is present for it;
+    non-required products that are absent come through as NaN URLs."""
+    if required_products is None:
+        required_products = products
+    extra = [p for p in required_products if p not in products]
+    if extra:
+        raise ValueError(
+            f"required_products must be a subset of products; "
+            f"unexpected: {[p.value for p in extra]}"
+        )
+
     md_list = []
     for product in products:
         logger.info("Querying NASA metadata API for product: %s", product.value)
@@ -49,10 +63,18 @@ def get_granule_metadata(
         pd.concat(md_list), geometry="granule_poly"
     ).reset_index(drop=True)
 
-    # Filter out granules with that do not have each required product.
-    nprod = md.groupby("granule_key")["product"].nunique()
-    omit = nprod[nprod != len(products)].index
-    logger.info("Excluding %d/%d granules with incomplete product sets.", len(omit), len(nprod))
+    # Keep only granules that have every required product. Non-required
+    # products that are absent for a granule come through as NaN URLs in
+    # the per-product columns after the groupby below.
+    required_set = {p.value for p in required_products}
+    present = md.groupby("granule_key")["product"].agg(set)
+    omit = present[~present.apply(lambda s: required_set <= s)].index
+    logger.info(
+        "Excluding %d/%d granules missing one or more required products (%s).",
+        len(omit),
+        len(present),
+        sorted(required_set),
+    )
     md = md[~md.granule_key.isin(omit)].reset_index(drop=True)
     md.drop(columns=["product"], inplace=True)
     md = md.groupby(["granule_key"]).agg(

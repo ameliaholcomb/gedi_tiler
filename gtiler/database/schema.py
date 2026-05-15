@@ -16,6 +16,11 @@ class Column:
     variable: str
     SDS_Name: str
     is_profile: bool = False
+    # For profile columns, the number of bins along the second HDF5
+    # axis. Used to expand the variable into per-bin DataFrame columns
+    # (e.g. rh -> rh_0..rh_100) even when the source granule is absent
+    # and the columns need to be NaN-filled.
+    n_bins: int = 0
 
 
 @dataclass
@@ -90,7 +95,7 @@ SCHEMA = Table(
                 Column(variable="digital_elevation_model", SDS_Name="digital_elevation_model"),
                 Column(variable="digital_elevation_model_srtm", SDS_Name="digital_elevation_model_srtm"),
                 Column(variable="num_detectedmodes", SDS_Name="num_detectedmodes"),
-                Column(variable="rh", SDS_Name="rh", is_profile=True),
+                Column(variable="rh", SDS_Name="rh", is_profile=True, n_bins=101),
                 Column(variable="selected_algorithm", SDS_Name="selected_algorithm"),
                 Column(variable="surface_flag", SDS_Name="surface_flag"),
                 # TODO should we also do elev_highestreturn?
@@ -116,12 +121,12 @@ SCHEMA = Table(
                 Column(variable="l2a_quality_flag", SDS_Name="l2a_quality_flag"),
                 Column(variable="l2b_quality_flag", SDS_Name="l2b_quality_flag"),
                 Column(variable="cover", SDS_Name="cover"),
-                Column(variable="cover_z", SDS_Name="cover_z", is_profile=True),
+                Column(variable="cover_z", SDS_Name="cover_z", is_profile=True, n_bins=30),
                 Column(variable="fhd_normal", SDS_Name="fhd_normal"),
                 Column(variable="omega", SDS_Name="omega"),
                 Column(variable="pai", SDS_Name="pai"),
-                Column(variable="pai_z", SDS_Name="pai_z", is_profile=True),
-                Column(variable="pavd_z", SDS_Name="pavd_z", is_profile=True),
+                Column(variable="pai_z", SDS_Name="pai_z", is_profile=True, n_bins=30),
+                Column(variable="pavd_z", SDS_Name="pavd_z", is_profile=True, n_bins=30),
                 Column(variable="pgap_theta", SDS_Name="pgap_theta"),
                 Column(variable="pgap_theta_error", SDS_Name="pgap_theta_error"),
                 Column(variable="rg", SDS_Name="rg"),

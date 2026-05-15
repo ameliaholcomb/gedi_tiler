@@ -1,6 +1,6 @@
 algorithm_description: Create a 1x1 tile of GEDI data
 algorithm_name: gedi-tile-writer
-algorithm_version: amelia-deploy-oymjJVZx
+algorithm_version: amelia-deploy-wZ76E79v
 build_command: gedi_tiler/build/build-env.sh
 disk_space: 10GB
 docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v5.0.0
@@ -39,6 +39,11 @@ inputs:
   - default: ''
     description: Quality-filter granules before adding to database
     name: quality
+    required: false
+  - default: ''
+    description: Enable DEBUG-level logging (default is INFO). Pass any non-empty value
+      to enable.
+    name: verbose
     required: false
 queue: maap-dps-worker-8gb
 repository_url: https://github.com/ameliaholcomb/gedi_tiler.git

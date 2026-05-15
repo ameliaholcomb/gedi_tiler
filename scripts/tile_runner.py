@@ -14,6 +14,38 @@ from gtiler.database.schema import GediProduct
 
 logger = logging.getLogger(__name__)
 
+# Map the lowercase CLI flag tokens for --required_products to the
+# matching GediProduct enum values.
+PRODUCT_FLAG_NAMES = {
+    "l2a": GediProduct.L2A,
+    "l2b": GediProduct.L2B,
+    "l4a": GediProduct.L4A,
+    "l4c": GediProduct.L4C,
+}
+
+
+def parse_required_products(raw: str) -> list:
+    """Parse a comma-separated `--required_products` value into a list of
+    GediProduct enums, validating that every token is a known product."""
+    tokens = [t.strip().lower() for t in raw.split(",") if t.strip()]
+    if not tokens:
+        raise argparse.ArgumentTypeError(
+            "--required_products must list at least one product"
+        )
+    unknown = [t for t in tokens if t not in PRODUCT_FLAG_NAMES]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown required_products: {unknown}; "
+            f"valid: {sorted(PRODUCT_FLAG_NAMES)}"
+        )
+    # Preserve order, dedupe.
+    seen = []
+    for t in tokens:
+        p = PRODUCT_FLAG_NAMES[t]
+        if p not in seen:
+            seen.append(p)
+    return seen
+
 def get_queue(tile_id):
     if (("N47" in tile_id) |
         ("S47" in tile_id) |
@@ -71,7 +103,14 @@ def main(args):
         GediProduct.L4A,
         GediProduct.L4C,
     ]
-    # Get CMR metadata for all granules covering the region
+    # Get CMR metadata for all granules covering the region. We query
+    # every product unconditionally so that non-required products still
+    # populate when CMR has them; granules that lack any required product
+    # are dropped, and the rest get NaN URLs for their missing products.
+    logger.info(
+        "Required products: %s",
+        [p.value for p in args.required_products],
+    )
     cmr_md = get_granule_metadata(
         shape_parser.check_and_format_shape(
             gpd.GeoDataFrame(geometry=covering),
@@ -81,6 +120,7 @@ def main(args):
         products,
         start_year=args.start_year,
         end_year=args.end_year,
+        required_products=args.required_products,
     )
     BAD_GRANULES = ["O33765_03"]
     cmr_md = cmr_md[~cmr_md.granule_key.isin(BAD_GRANULES)]
@@ -199,7 +239,8 @@ def main(args):
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
-                version="amelia-deploy-yfpetMPn",
+                version="amelia-deploy-k1rCo7To",
+                # version="amelia-deploy-yfpetMPn",
                 queue=queue,
                 bucket=args.bucket,
                 prefix=args.prefix,
@@ -280,6 +321,18 @@ if __name__ == "__main__":
         "--fast_scan",
         action="store_true",
         help="Quickly scan existing tiles in database without checking for valid parquet files.",
+    )
+    parser.add_argument(
+        "--required_products",
+        type=parse_required_products,
+        default=list(PRODUCT_FLAG_NAMES.values()),
+        help=(
+            "Comma-separated subset of {l2a,l2b,l4a,l4c} (default: all "
+            "four). Granules must have every listed product to be "
+            "included; missing non-required products are NaN-filled in "
+            "the per-tile metadata, and dps_tile_builder NaN-fills their "
+            "columns at tile-build time."
+        ),
     )
 
     args = parser.parse_args()
