@@ -9,12 +9,7 @@ logger = logging.getLogger(__name__)
 def main(args):
     # 1. Create a new database containing only updated years
     # TODO: Could do some validation checks here.
-    command = f"""python3 tile_runner.py \
-               --bucket {args.bucket} \
-               --prefix {args.prefix}_updates \
-               --shapefile {args.shapefile} \
-               --start_year {args.start_year} \
-               --end_year {args.end_year}"""
+    command = f"""python3 scripts/tile_runner.py --job_code {args.prefix.split("/")[-1]}_updates --job_iteration 1 --bucket {args.bucket} --prefix {args.prefix}_updates --shapefile {args.shapefile} --start_year {args.start_year} --end_year {args.end_year} --fast_scan"""
     logger.info("Create an updates table using the following command:")
     logger.info("%s", command)
     input("When these jobs have completed, press ENTER to continue >>>")
@@ -29,7 +24,7 @@ def main(args):
     input("When this command has completed, press ENTER to continue >>>")
 
     # 3. Update the metadata
-    con = ducky.init_duckdb()
+    con = ducky.init_duckdb(temp_dir='/projects/my-private-bucket/tmp/duckdb_swap')
     if args.save_md:
         # copy existing metadata to metadata_old
         existing_md_prefix = ducky.metadata_prefix(args.bucket, args.prefix)
@@ -57,13 +52,13 @@ def main(args):
             SELECT * FROM update_md
         ),
         RankedData AS (
-            -- Step 2: Rank the rows within each (granule_id, tile_id) partition.
+            -- Step 2: Rank the rows within each (granule_key, tile_id) partition.
             SELECT 
                 *,
-                -- Order duplicate (granule_id, tile_id) rows based on the timestamp in 
+                -- Order duplicate (granule_key, tile_id) rows based on the timestamp in 
                 -- DESCending order, meaning the most recent timestamp gets rank 1.
                 ROW_NUMBER() OVER (
-                    PARTITION BY granule_id, tile_id
+                    PARTITION BY granule_key, tile_id
                     ORDER BY cmr_access_time DESC
                 ) AS rn
             FROM CombinedData
