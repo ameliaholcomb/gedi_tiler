@@ -22,9 +22,6 @@ logger = logging.getLogger(__name__)
 
 def main(args):
     shape = gpd.read_file(args.shapefile).to_crs("EPSG:4326")
-    if len(shape) > 1:
-        raise ValueError("Currently, only single polygons are supported.")
-    geom = shape.geometry.values[0]
 
     maap = MAAP()
     username = maap.profile.account_info()["username"]
@@ -36,7 +33,7 @@ def main(args):
     )
 
     res = crossovers.find_repeat_footprints(
-        con, data_spec, geom, args.distance_m, args.filters, args.columns
+        con, data_spec, shape, args.distance_m, args.filters, args.columns
     )
     logger.info("Found %d repeat footprint pairs.", len(res))
 
