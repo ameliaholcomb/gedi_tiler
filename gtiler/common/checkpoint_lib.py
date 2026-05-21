@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import logging
 import pandas as pd
 import pickle
+import tempfile
 
 from gtiler.common import s3_utils
 
@@ -108,6 +109,10 @@ class Checkpointer:
         """
         Write the checkpoint to S3 using multipart upload
         with optimistic concurrency control.
+
+        The checkpoint is pickled to a temporary file on disk and then
+        streamed to S3 in chunks, so peak memory stays at roughly the
+        size of `processed_data` rather than 2x.
         """
         checkpoint = CheckpointData(
             generation=self.generation,
@@ -116,33 +121,37 @@ class Checkpointer:
             quality_filter=quality_filter,
         )
         logger.info("Writing checkpoint: %s", checkpoint)
-        try:
-            if self.etag is None:  # First write, no existing checkpoint
-                self.etag = s3_utils.conditional_multipart_put(
-                    bucket=self.bucket,
-                    key=self.checkpoint_key,
-                    data=pickle.dumps(checkpoint),
-                    if_none_match="*",
-                )
-            else:
-                self.etag = s3_utils.conditional_multipart_put(
-                    bucket=self.bucket,
-                    key=self.checkpoint_key,
-                    data=pickle.dumps(checkpoint),
-                    if_match=self.etag,
-                )
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "PreconditionFailed":
-                raise
-            existing_checkpoint = self.read_checkpoint()
-            if existing_checkpoint.generation >= self.generation:
-                raise CheckpointConflict(f"Read gen {existing_checkpoint.generation} > {self.generation}")
-            else:
-                logger.info(
-                    "Checkpoint generation %d lower than job generation %d, retrying write ...",
-                    existing_checkpoint.generation,
-                    self.generation,
-                )
-                return self.write_checkpoint(
-                    granules_to_process, processed_data, quality_filter
-                )
+        while True:
+            with tempfile.TemporaryFile() as tmp:
+                pickle.dump(checkpoint, tmp, protocol=pickle.HIGHEST_PROTOCOL)
+                tmp.seek(0)
+                try:
+                    if self.etag is None:  # First write, no existing checkpoint
+                        self.etag = s3_utils.conditional_multipart_put(
+                            bucket=self.bucket,
+                            key=self.checkpoint_key,
+                            body=tmp,
+                            if_none_match="*",
+                        )
+                    else:
+                        self.etag = s3_utils.conditional_multipart_put(
+                            bucket=self.bucket,
+                            key=self.checkpoint_key,
+                            body=tmp,
+                            if_match=self.etag,
+                        )
+                    return
+                except ClientError as e:
+                    if e.response["Error"]["Code"] != "PreconditionFailed":
+                        raise
+                    existing_checkpoint = self.read_checkpoint()
+                    if existing_checkpoint.generation >= self.generation:
+                        raise CheckpointConflict(
+                            f"Read gen {existing_checkpoint.generation} > {self.generation}"
+                        )
+                    logger.info(
+                        "Checkpoint generation %d lower than job generation %d, retrying write ...",
+                        existing_checkpoint.generation,
+                        self.generation,
+                    )
+                    # loop and re-pickle into a fresh tempfile
