@@ -14,19 +14,19 @@ K_RING = 2
 EDGE_LENGTH_M = 28.66
 # SQRT(67)/4 * edge_length is the smallest distance between a point in the
 # central hexagon and a point outside of the h3_disk of radius 2.
-# This is therefore the largest theoretical distance supported by the library 
-# without changing the H3_resolution and k-ring diameter. 
+# This is therefore the largest theoretical distance supported by the library
+# without changing the H3_resolution and k-ring diameter.
 # (with a 5 m buffer to account for hexagon size variability.)
 # Changing the H3 resolution can have high query performance impact.
 # Without exploring the optimal tradeoff for various distances, for now we
 # hard-code this one, which works well for diameters up to ~50 m.
-MAX_DISTANCE_M = math.sqrt(67)/4 * EDGE_LENGTH_M - 5
+MAX_DISTANCE_M = math.sqrt(67) / 4 * EDGE_LENGTH_M - 5
 
 
 def find_repeat_footprints(
     con,
     data_spec: str,
-    geom: Polygon,
+    region_gdf: gpd.GeoDataFrame,
     distance_threshold_m: float = 40.0,
     filters: Optional[str] = None,
     columns: Optional[List[str]] = None,
@@ -42,10 +42,10 @@ def find_repeat_footprints(
         Existing DuckDB connection.
     data_spec : str
         Data spec (glob string) for the GEDI table parquet files.
-    geom : Polygon
-        Shapely Polygon defining the area of interest in (LON, LAT) format.
+    region : gpd.GeoDataFrame
+        GeoDataFrame defining the area of interest in (LON, LAT) format.
     distance_threshold_m : float, default 40.0
-        Maximum distance in meters between footprint centers for a pair to be included. 
+        Maximum distance in meters between footprint centers for a pair to be included.
     filters : str, optional
         SQL WHERE clause conditions to filter footprints (e.g., "l4_quality_flag_l4a = 1").
         Do not include "WHERE" keyword.
@@ -80,8 +80,7 @@ def find_repeat_footprints(
     # Ensure that this is a suitably small region
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=UserWarning)
-        region = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
-        if region.area.sum() > 9:
+        if region_gdf.area.sum() > 9:
             raise ValueError(
                 "This function is not yet designed to handle large regions. "
                 "Please contact Amelia and tell her you need this feature ASAP."
@@ -98,16 +97,18 @@ def find_repeat_footprints(
     # Build column selection
     base_columns = ["shot_number", "lat_lowestmode", "lon_lowestmode"]
     if columns:
-        select_columns = base_columns + [c for c in columns if c not in base_columns]
+        select_columns = base_columns + [
+            c for c in columns if c not in base_columns
+        ]
     else:
         select_columns = base_columns
 
     select_clause = ", ".join(select_columns)
 
     # Build filter clause
-    filter_clause = f"ST_Contains(ST_GeomFromText('{geom.wkt}'), geometry)"
-    spatial_filter = ducky.spatial_filter_clause(
-        gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326"))
+    duck_region = ducky.gdf_to_duck(con, region_gdf)
+    filter_clause = "ST_Contains(duck_region.geometry, read_parquet.geometry)"
+    spatial_filter = ducky.spatial_filter_clause(region_gdf)
     filter_clause += f" AND {spatial_filter}"
     if filters:
         filter_clause += f" AND {filters}"
@@ -119,7 +120,8 @@ def find_repeat_footprints(
         CREATE OR REPLACE TEMP TABLE pts AS
         SELECT {select_clause},
                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, {h3_resolution}) AS h3_cell
-        FROM read_parquet('{data_spec}')
+        FROM
+            read_parquet('{data_spec}'), duck_region
         WHERE {filter_clause};
     """)
 
@@ -140,9 +142,10 @@ def find_repeat_footprints(
     if columns:
         join_cols_1 = ", " + ", ".join([f"t1.{c} AS t1_{c}" for c in columns])
         join_cols_2 = ", " + ", ".join([f"t2.{c} AS t2_{c}" for c in columns])
-    
-    joined_cols = ", ".join([f"t1_{c}" for c in columns] + [f"t2_{c}" for c in columns])
 
+    joined_cols = ", ".join(
+        [f"t1_{c}" for c in columns] + [f"t2_{c}" for c in columns]
+    )
 
     # Note: ST_Point takes (lat, lon) order for our data
     query = f"""--sql
