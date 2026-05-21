@@ -201,15 +201,14 @@ def main(args):
             input("To proceed to create tile metadata, press ENTER >>>")
         logger.info("Writing metadata for required tiles to S3...")
 
-        ducky.gdf_to_duck(
+        new_md = ducky.gdf_to_duck(
             con,
             tile_granule_gdf,
-            "tile_granule_gdf",
             geometry_columns=["geometry", "granule_geometry"],
         )
         md_prefix = ducky.metadata_prefix(args.bucket, args.prefix)
         con.sql(f"""
-            COPY tile_granule_gdf TO '{md_prefix}' (
+            COPY new_md TO '{md_prefix}' (
                 FORMAT parquet,
                 PARTITION_BY ({ducky.TILE_ID}),
                 COMPRESSION zstd,
@@ -239,7 +238,7 @@ def main(args):
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
-                version="amelia-deploy-k1rCo7To",
+                version="amelia-deploy-nScOUwBm",
                 # version="amelia-deploy-yfpetMPn",
                 queue=queue,
                 bucket=args.bucket,

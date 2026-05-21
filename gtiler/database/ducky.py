@@ -96,7 +96,6 @@ def duck_to_gdf(
         geometry=gpd.GeoSeries.from_wkb(df[geometry_columns[0]]),
         crs=crs,
     )
-    gdf.drop(columns=[geometry_columns[0]], inplace=True)
     if len(geometry_columns) > 1:
         for geom_col in geometry_columns[1:]:
             gdf[geom_col] = gpd.GeoSeries.from_wkb(df[geom_col])
@@ -106,9 +105,8 @@ def duck_to_gdf(
 def gdf_to_duck(
     con,
     gdf: gpd.GeoDataFrame,
-    table_name: str,
     geometry_columns: List[str] = ["geometry"],
-):
+) -> duckdb.DuckDBPyRelation:
     """Load a GeoDataFrame into a DuckDB table."""
     # Convert geometries to WKT
     gdf_tmp = gdf.copy()
@@ -116,13 +114,13 @@ def gdf_to_duck(
         # ignore that the df now has a geometry column of strings
         warnings.simplefilter("ignore")
         for col in geometry_columns:
-            gdf_tmp[col] = gdf_tmp[col].to_wkt()
-
+            gdf_tmp[col] = gpd.GeoSeries(gdf_tmp[col]).to_wkt()
     replace_cols = ", ".join(
         [f"ST_GeomFromText({col}) AS {col}" for col in geometry_columns]
     )
-    con.execute(f"""
-        CREATE OR REPLACE TABLE {table_name} AS
+    # Execute immediately to use local context table (gdf_tmp)
+    rel = con.sql(f"""
         SELECT * REPLACE ({replace_cols})
         FROM gdf_tmp
-    """)
+    """).execute()
+    return rel
