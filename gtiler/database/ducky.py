@@ -2,6 +2,7 @@ from typing import List
 import duckdb
 import geopandas as gpd
 import warnings
+import shapely.ops
 
 from gtiler.database import tiles
 
@@ -32,6 +33,14 @@ def brazil_data_spec():
     BUCKET = "maap-ops-workspace"
     PREFIX = "shared/ameliah/gedi-test/brazil_tiles"
     return data_spec(BUCKET, PREFIX)
+
+
+def attach_ducklake(con, bucket, prefix, name="gedi_dl"):
+    ducklake_path = f"s3://{bucket}/{prefix}/ducklake/gedi.ducklake"
+    con.sql(f"""--sql
+            ATTACH 'ducklake:{ducklake_path}' AS {name} (READ_ONLY);
+            USE {name};
+    """)
 
 
 def data_prefix(bucket, prefix):
@@ -87,6 +96,7 @@ def duck_to_gdf(
         geometry=gpd.GeoSeries.from_wkb(df[geometry_columns[0]]),
         crs=crs,
     )
+    gdf.drop(columns=[geometry_columns[0]], inplace=True)
     if len(geometry_columns) > 1:
         for geom_col in geometry_columns[1:]:
             gdf[geom_col] = gpd.GeoSeries.from_wkb(df[geom_col])
