@@ -87,16 +87,19 @@ def s3_prefix_exists(s3_path: str) -> bool:
 def conditional_multipart_put(
     bucket: str,
     key: str,
-    data: bytes,
+    body,
     *,
     if_match: str = None,
     if_none_match: str = None,
 ) -> str:
-    """Upload bytes to S3 using multipart upload with a conditional write.
+    """Upload a file-like object to S3 using multipart upload with a conditional write.
 
     The condition is evaluated atomically at CompleteMultipartUpload time.
 
     Args:
+        body: A readable, binary file-like object positioned at the start of
+            the payload. Read in 5 MB chunks so peak memory stays bounded
+            regardless of payload size.
         if_match: Require the existing object to have this ETag (for updates).
         if_none_match: Pass "*" to require the object not to exist (for creates).
     Returns:
@@ -113,8 +116,10 @@ def conditional_multipart_put(
         parts = []
         chunk_size = 5 * 1024 * 1024  # 5 MB minimum for non-final parts
         part_number = 1
-        for offset in range(0, len(data), chunk_size):
-            chunk = data[offset : offset + chunk_size]
+        while True:
+            chunk = body.read(chunk_size)
+            if not chunk:
+                break
             resp = s3_client.upload_part(
                 Bucket=bucket,
                 Key=key,
