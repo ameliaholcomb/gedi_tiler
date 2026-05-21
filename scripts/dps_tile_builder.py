@@ -1,6 +1,5 @@
 import argparse
 from botocore.exceptions import ReadTimeoutError, ConnectTimeoutError
-import faulthandler
 import h5py
 import geopandas as gpd
 import logging
@@ -8,6 +7,8 @@ import numpy as np
 import pandas as pd
 import psutil
 import sys
+import threading
+import traceback
 from typing import List, Tuple
 
 import time
@@ -360,6 +361,23 @@ def log_memory(logger, message=""):
     logger.info(f"Current memory usage: {mem_usage_gb:.2f} GB {message}")
 
 
+def _start_watchdog(interval: int = 60):
+    """Periodically dump Python-level stacks of every thread to stderr."""
+    def _run():
+        while True:
+            time.sleep(interval)
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            lines = [f"\n--- WATCHDOG dump at {ts} ---\n"]
+            for tid, frame in sys._current_frames().items():
+                lines.append(f"\n# Thread {tid}\n")
+                lines.extend(traceback.format_stack(frame))
+            sys.stderr.write("".join(lines))
+            sys.stderr.flush()
+
+    t = threading.Thread(target=_run, name="watchdog", daemon=True)
+    t.start()
+
+
 def run_main(args: argparse.Namespace):
     """Main function to create a tile."""
     t1 = time.time()
@@ -480,9 +498,7 @@ if __name__ == "__main__":
         # connection/credential events at INFO.
         logging.getLogger("botocore").setLevel(logging.INFO)
         logging.getLogger("urllib3").setLevel(logging.INFO)
-        # If the job hangs, dump every thread's Python+C stack to stderr
-        # every 60s so we can localize the stuck call without a debugger.
-        faulthandler.enable()
-        faulthandler.dump_traceback_later(60, repeat=True)
+        # Periodic Python-frame dump for hang diagnosis.
+        _start_watchdog(60)
     args = check_args(args)
     run_main(args)
