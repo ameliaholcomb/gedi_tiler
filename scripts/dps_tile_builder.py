@@ -1,5 +1,6 @@
 import argparse
 from botocore.exceptions import ReadTimeoutError, ConnectTimeoutError
+import faulthandler
 import h5py
 import geopandas as gpd
 import logging
@@ -124,10 +125,23 @@ def check_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def _get_indices_in_tile(f, beam, geometry: GeometryColumn, tile):
     """Get the range of shot indices for a single beam that lie in the tile."""
+    logger.info("Scanning beam geometries...")
     # TODO: This function could use some tests.
     # e.g. individual values can be nan, no data, lons/lats not in order
+    logger.debug(
+        "[%s] reading lats array (%s) ...", beam, geometry.lat.SDS_Name
+    )
     lats = f[f"{beam}/{geometry.lat.SDS_Name}"][:]
+    logger.debug(
+        "[%s] lats read (%d values); reading lons array (%s) ...",
+        beam,
+        len(lats),
+        geometry.lon.SDS_Name,
+    )
     lons = f[f"{beam}/{geometry.lon.SDS_Name}"][:]
+    logger.debug(
+        "[%s] lons read (%d values); computing tile mask ...", beam, len(lons)
+    )
     return np.where(
         (lons >= tile.minx)
         & (lons < tile.maxx)
@@ -156,30 +170,37 @@ def load_granule_product(
     anci = {}
     extra = [product.primary_key, product.geometry.lat, product.geometry.lon]
     try:
-        with rfs.get_fs().open(s3url, mode="rb") as f, h5py.File(f) as hdf5:
-            full_df = []
-            for k in hdf5.keys():
-                if not k.startswith("BEAM"):
-                    continue
-                idxs = _get_indices_in_tile(hdf5, k, product.geometry, tile)
-                if len(idxs) == 0:  # no tile data in beam
-                    continue
-                dfs = {}
-                for v in product.variables + extra:
-                    if "ancillary" in v.SDS_Name.lower():
-                        anci[v.variable] = hdf5[f"{k}/{v.SDS_Name}"][:][0]
+        logger.debug("Opening S3 file %s ...", s3url)
+        with rfs.get_fs().open(s3url, mode="rb") as f:
+            logger.debug("S3 file opened, reading HDF5 metadata ...")
+            with h5py.File(f) as hdf5:
+                logger.debug("HDF5 metadata read, file ready")
+                logger.debug("Opened file, loading data ...")
+                full_df = []
+                for k in hdf5.keys():
+                    if not k.startswith("BEAM"):
                         continue
-                    d = hdf5[f"{k}/{v.SDS_Name}"][idxs]
-                    if d.ndim == 2:
-                        # unroll profile data into separate columns
-                        for col in range(d.shape[-1]):
-                            vv = f"{v.variable}_{col}"
-                            dfs[vv] = d[:, col]
-                    else:
-                        dfs[v.variable] = d
-                dfs = pd.DataFrame(dfs)
-                dfs["beam_name"] = k
-                full_df.append(dfs)
+                    idxs = _get_indices_in_tile(hdf5, k, product.geometry, tile)
+                    if len(idxs) == 0:  # no tile data in beam
+                        continue
+                    dfs = {}
+                    logger.debug("Starting to read variables for beam.")
+                    for v in product.variables + extra:
+                        if "ancillary" in v.SDS_Name.lower():
+                            anci[v.variable] = hdf5[f"{k}/{v.SDS_Name}"][:][0]
+                            continue
+                        d = hdf5[f"{k}/{v.SDS_Name}"][idxs]
+                        if d.ndim == 2:
+                            # unroll profile data into separate columns
+                            for col in range(d.shape[-1]):
+                                vv = f"{v.variable}_{col}"
+                                dfs[vv] = d[:, col]
+                        else:
+                            dfs[v.variable] = d
+                    logger.debug("Finished reading variables for beam.")
+                    dfs = pd.DataFrame(dfs)
+                    dfs["beam_name"] = k
+                    full_df.append(dfs)
     except (ReadTimeoutError, ConnectTimeoutError) as e:
         logger.warning(f"Timeout reading {s3url}: {e}")
         if retry_count <= 0:
@@ -192,6 +213,10 @@ def load_granule_product(
             f"Timeout reading {s3url}, retrying in {wait}s ({retry_count} attempts left)..."
         )
         time.sleep(wait)
+        logger.debug(
+            "Timeout backoff complete, restarting load_granule_product (retries left: %d)",
+            retry_count - 1,
+        )
         return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
     except Exception as e:
         if retry_count <= 0:
@@ -199,9 +224,14 @@ def load_granule_product(
         # Try again with new credentials, but if that doesn't work, fail.
         logger.warning("Refreshing S3 credentials and retrying...")
         rfs.refresh()
+        logger.debug(
+            "Credentials refreshed, restarting load_granule_product (retries left: %d)",
+            retry_count - 1,
+        )
         return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
     if len(full_df) == 0:
         return pd.DataFrame()  # no tile data in granule
+    logger.debug("Concatenating beam data ...")
     full_df = pd.concat(full_df)
     for j in anci.keys():
         full_df[j] = anci[j]
@@ -280,6 +310,7 @@ def load_granule(
             columns=["beam_name", "lon_lowestmode", "lat_lowestmode"],
             inplace=True,
         )
+        logger.debug("Joining products ...")
         full_df = full_df.join(df, how="inner")
     log_memory(logger, "load_granule after join")
 
@@ -444,5 +475,14 @@ if __name__ == "__main__":
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stderr,
     )
+    if args.verbose:
+        # Silence DEBUG-level firehose from boto3/urllib3; we still get
+        # connection/credential events at INFO.
+        logging.getLogger("botocore").setLevel(logging.INFO)
+        logging.getLogger("urllib3").setLevel(logging.INFO)
+        # If the job hangs, dump every thread's Python+C stack to stderr
+        # every 60s so we can localize the stuck call without a debugger.
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(60, repeat=True)
     args = check_args(args)
     run_main(args)
