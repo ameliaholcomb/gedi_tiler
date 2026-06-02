@@ -1,3 +1,4 @@
+import boto3
 from typing import List
 import duckdb
 import geopandas as gpd
@@ -11,6 +12,8 @@ YEAR = "year"
 
 
 def init_duckdb(temp_dir: str = None):
+    session = boto3.Session()
+    creds = session.get_credentials().get_frozen_credentials()
     con = duckdb.connect()
     # con.execute("SET access_mode = 'READ_ONLY';")
     con.install_extension("spatial")
@@ -19,7 +22,17 @@ def init_duckdb(temp_dir: str = None):
     con.load_extension("aws")
     con.install_extension("httpfs")
     con.load_extension("httpfs")
-    con.execute("CREATE SECRET ( TYPE s3, PROVIDER credential_chain);")
+    # Set AWS credentials explicitly; using the credential chain sometimes
+    # fetches the incorrect credentials on the MAAP Hub.
+    con.execute(f"""
+        CREATE OR REPLACE SECRET (
+            TYPE s3,
+            KEY_ID '{creds.access_key}',
+            SECRET '{creds.secret_key}',
+            SESSION_TOKEN '{creds.token}',
+            REGION 'us-west-2'
+        )
+    """)
     con.execute("SET enable_progress_bar = true;")
     con.execute("SET preserve_insertion_order = false;")
     con.execute("SET memory_limit = '8GB';")
