@@ -6,7 +6,7 @@ To try out the database, first run
 ```bash
 conda env update -f environment.yml
 ```
-Then you're ready check out the examples and tutorial in `tiling_demo.ipynb`!
+Then you're ready check out the examples and tutorial in `demos/quickstart.ipynb`!
 
 ## Creating a tiled database
 To create a new tiled database using DPS, run
@@ -35,10 +35,6 @@ s3://{BUCKET}/{PREFIX}/ - data/
 
 Note that you may need to re-run the tile_runner script multiple times on the same region to process all of the tiles, to account for DPS job failures.
 It is safe to re-run this script as many times as you need until it reports that no new tiles need to be added to the database.
-
-However, due to bugs in the listJobs API (https://github.com/MAAP-Project/maap-api-nasa/issues/177), rerunning the script _while there are still tile creation jobs running_ will create duplicate jobs.
-This is not necessarily safe and could result in corrupt data/undefined behavior if two jobs try to write the same tile at the same time.
-To check if there are jobs still running, search for DPS jobs matching the `job_code` string passed to the script using the dps-job-management view.
 Tile creation jobs checkpoint throughout and can be cancelled without losing too much work.
 
 ## Managing a tiled database
