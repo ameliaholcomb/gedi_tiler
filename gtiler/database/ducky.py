@@ -9,7 +9,9 @@ from gtiler.database import tiles
 
 TILE_ID = "tile_id"
 YEAR = "year"
-
+ESA_TESTDB_PATH = "s3://nasa-maap-data-store/file-staging/nasa-map/gedi-tiled-v2"
+ESA_TESTDB_MANIFEST_PATH = f"{ESA_TESTDB_PATH}/manifest.txt"
+ESA_TESTDB_ICEBERG_PATH = f"{ESA_TESTDB_PATH}/iceberg/gedi_tiled_v2/metadata/latest.metadata.json"
 
 def init_duckdb(temp_dir: str = None):
     session = boto3.Session()
@@ -42,6 +44,49 @@ def init_duckdb(temp_dir: str = None):
     return con
 
 
+def init_duckdb_esa(temp_dir: str = None, memory_limit = '8GB'):
+    con = duckdb.connect()
+    con.install_extension("spatial")
+    con.load_extension("spatial")
+    con.install_extension("httpfs")
+    con.load_extension("httpfs")
+    con.install_extension("iceberg")
+    con.load_extension("iceberg")
+    con.execute("SET enable_progress_bar = true;")
+    con.execute("SET preserve_insertion_order = false;")
+    con.execute(f"SET memory_limit = '{memory_limit}';")
+    if temp_dir:
+        con.sql(f"SET temp_directory='{temp_dir}'")
+    con.sql("SET max_temp_directory_size = '100GB'")
+    return con
+    
+    
+def load_database_from_manifest(con, manifest_path, name = 'gedi_data'):
+    con.sql(f"""
+        SET VARIABLE gedi_v2_files = (
+            SELECT list(href)
+            FROM read_csv(
+                '{manifest_path}',
+                header = false,
+                columns = {{'href': 'VARCHAR'}}
+            )
+        );
+        CREATE OR REPLACE VIEW {name} AS
+        SELECT *
+        FROM read_parquet(
+            getvariable('gedi_v2_files'),
+            hive_partitioning = true
+        );
+    """)
+
+
+def load_database_from_iceberg(con, iceberg_path, name = 'gedi_iceberg'):
+    return con.sql(f"""
+        CREATE OR REPLACE VIEW {name} AS
+        SELECT *
+        FROM iceberg_scan('{iceberg_path}')
+    """)
+    
 def brazil_data_spec():
     BUCKET = "maap-ops-workspace"
     PREFIX = "shared/ameliah/gedi-test/brazil_tiles"
