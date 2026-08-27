@@ -7,7 +7,7 @@ dependencies:
   - pandas=2.3.3
   - geopandas=1.1.2
   - shapely=2.1.0
-  - duckdb=1.4.1
+  - duckdb=1.5.5
   - libgdal-arrow-parquet
   - pyarrow
   - pytest

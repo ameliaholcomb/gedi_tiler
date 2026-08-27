@@ -413,15 +413,20 @@ def run_main(args: argparse.Namespace):
 
     con = ducky.init_duckdb()
     aws_prefix = ducky.data_prefix(args.bucket, args.prefix)
-    df = con.sql("""
-        SELECT *,
-            ST_Point(lon_lowestmode, lat_lowestmode) AS geometry,
-            date_part('year', absolute_time) AS year
-        FROM full_df
-    """)
-    con.sql(f"""
-        COPY df TO '{aws_prefix}' (
+    tile_bounds = (
+        f"ST_MakeBox2D(ST_Point({args.tile.minx}, {args.tile.miny}), "
+        f"ST_Point({args.tile.maxx}, {args.tile.maxy}))"
+    )
+    con.sql(f"""--sql
+        COPY (
+            SELECT *,
+                ST_Point(lon_lowestmode, lat_lowestmode) AS geometry,
+                date_part('year', absolute_time) AS year
+            FROM full_df
+            ORDER BY ST_Hilbert(geometry, {tile_bounds})
+        ) TO '{aws_prefix}' (
             FORMAT parquet,
+            GEOPARQUET_VERSION 'V2',
             PARTITION_BY ({ducky.TILE_ID}, {ducky.YEAR}),
             COMPRESSION zstd,
             ROW_GROUP_SIZE 100_000,
