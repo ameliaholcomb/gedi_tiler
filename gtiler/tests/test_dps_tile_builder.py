@@ -81,10 +81,18 @@ def dps_tile_builder():
 @pytest.fixture
 def fixture_metadata():
     """Fixture metadata with quality filtering off, as tile_runner would
-    record it for a --no-quality build."""
+    record it for a --no-quality build. The stored granule URLs are
+    absolute paths from the machine that built the fixtures, so resolve
+    them against this checkout's granule directory."""
     path = FIXTURES / f"metadata/tile_id={TILE_ID}/data_0.parquet"
     md = gpd.read_file(path)
     md["quality_filter"] = False
+    for col in [c for c in md.columns if c.endswith("_url")]:
+        md[col] = md[col].map(
+            lambda u: str(FIXTURES / "granules" / u.rsplit("/", 1)[1])
+            if pd.notna(u)
+            else u
+        )
     return md
 
 
@@ -383,4 +391,27 @@ class TestQualityFilter:
         assert len(df) > 0
         assert df["wsci"].isna().any(), (
             "expected NaN-filled L4C columns for the granule with no L4C URL"
+        )
+
+
+class TestEmptyTile:
+    """A tile whose granules contribute no footprints writes a marker
+    instead of a partition, so it is not planned again."""
+
+    @pytest.fixture
+    def empty_tile_args(self, args):
+        # A tile the fixture granules do not intersect.
+        args.tile_id = "N80_E000"
+        args.tile = Tile(args.tile_id)
+        return args
+
+    def test_writes_marker_and_no_parquet(
+        self, empty_tile_args, run_pipeline_factory, fixture_metadata
+    ):
+        out = run_pipeline_factory(fixture_metadata)
+        marker = out / f"tile_id={empty_tile_args.tile_id}" / "_EMPTY"
+        assert marker.is_file(), f"expected an empty marker at {marker}"
+        assert marker.stat().st_size == 0
+        assert not list(out.glob("**/*.parquet")), (
+            "an empty tile should not write a parquet partition"
         )

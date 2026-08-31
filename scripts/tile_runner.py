@@ -1,5 +1,6 @@
 import argparse
 import boto3
+import fsspec
 import geopandas as gpd
 import logging
 import pandas as pd
@@ -81,6 +82,13 @@ def get_tile_ids_novalidation(bucket, prefix):
             if segment.startswith("tile_id="):
                 tile_ids.append(segment.split("=", 1)[1])     # "N06_W123"
     return tile_ids
+
+
+def get_empty_tile_ids(bucket, prefix):
+    """Tiles whose jobs completed without producing any footprints."""
+    fs = fsspec.filesystem("s3")
+    paths = fs.glob(ducky.empty_marker_spec(bucket, prefix))
+    return {p.split("/")[-2].split("=", 1)[1] for p in paths}
 
 
 def check_quality_consistency(con, md_spec: str, quality: bool):
@@ -183,6 +191,7 @@ def main(args):
     path = ducky.data_prefix(args.bucket, args.prefix)
     if s3_utils.s3_prefix_exists(path):
         if args.fast_scan:
+            # Listing includes tiles holding only an empty marker.
             existing_tiles = set(get_tile_ids_novalidation(args.bucket, args.prefix))
             logger.info("Found %d existing tiles (fast scan).", len(existing_tiles))
         else:
@@ -191,7 +200,8 @@ def main(args):
                 f"SELECT DISTINCT tile_id FROM read_parquet('{data_spec}')"
             ).fetchall()
             existing_tiles = {x[0] for x in existing_tiles}
-            # TODO: Do we need a way for jobs to mark that they completed but had no data?
+            # Empty tiles hold no rows for the scan above to find.
+            existing_tiles |= get_empty_tile_ids(args.bucket, args.prefix)
     else:
         existing_tiles = set()
 

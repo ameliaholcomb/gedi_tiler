@@ -386,9 +386,16 @@ def run_main(args: argparse.Namespace):
             quality_filter=quality_filter,
         )
     full_df = pd.concat(dfs)
-    full_df["tile_id"] = args.tile_id
     t3 = time.time()
     logger.info("Loading granules took %.1f seconds.", t3 - t2)
+
+    if len(full_df) == 0:
+        marker = ducky.empty_marker_path(args.bucket, args.prefix, args.tile_id)
+        logger.info("No footprints to write. Marking tile empty: %s", marker)
+        s3_utils.write_empty_file(marker)
+        return 0
+
+    full_df["tile_id"] = args.tile_id
 
     con = ducky.init_duckdb()
     aws_prefix = ducky.data_prefix(args.bucket, args.prefix)

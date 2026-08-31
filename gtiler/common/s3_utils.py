@@ -84,6 +84,13 @@ def s3_prefix_exists(s3_path: str) -> bool:
     return fs.exists(s3_path)
 
 
+def write_empty_file(path: str) -> None:
+    """Create a zero-byte file at path, which may be local or on S3."""
+    fs, p = fsspec.core.url_to_fs(path)
+    fs.makedirs(p.rsplit("/", 1)[0], exist_ok=True)
+    fs.pipe_file(p, b"")
+
+
 def conditional_multipart_put(
     bucket: str,
     key: str,
