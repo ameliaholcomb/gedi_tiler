@@ -477,7 +477,7 @@ def run_main(args: argparse.Namespace):
             GEOPARQUET_VERSION 'V2',
             PARTITION_BY ({ducky.TILE_ID}, {ducky.YEAR}),
             COMPRESSION zstd,
-            ROW_GROUP_SIZE 100_000,
+            ROW_GROUP_SIZE 200_000,
             OVERWRITE_OR_IGNORE
         );
     """)
