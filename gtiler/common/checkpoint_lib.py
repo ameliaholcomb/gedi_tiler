@@ -78,24 +78,12 @@ class Checkpointer:
         else:
             return None
 
-    def _legacy_parse_checkpoint(self, checkpoint_tuple):
-        """Parse checkpoints from before the CheckpointData class."""
-        # TODO: Remove this function after all existing checkpoints
-        # have been updated or made obsolete
-        return CheckpointData(
-            granules_to_process=checkpoint_tuple[0],
-            processed_data=checkpoint_tuple[1],
-            quality_filter=True,
-        )
-
     def read_checkpoint(self) -> CheckpointData:
         """Read the checkpoint from S3 and return the CheckpointData."""
         s3 = boto3.client("s3")
         response = s3.get_object(Bucket=self.bucket, Key=self.checkpoint_key)
         self.etag = response["ETag"]
         checkpoint = pickle.loads(response["Body"].read())
-        if not isinstance(checkpoint, CheckpointData):
-            checkpoint = self._legacy_parse_checkpoint(checkpoint)
         if checkpoint.generation > self.generation:
             raise CheckpointConflict(f"Read gen {checkpoint.generation} > {self.generation}")
         return checkpoint

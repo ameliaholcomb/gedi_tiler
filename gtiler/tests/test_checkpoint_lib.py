@@ -143,19 +143,6 @@ class TestReadCheckpoint:
         assert result.granules_to_process == sample_checkpoint.granules_to_process
         assert checkpointer.etag == etag
 
-    def test_parses_legacy_tuple_format(self, s3, checkpointer):
-        granules = ["g1", "g2"]
-        processed = pd.DataFrame({"shot_id": [10, 20]})
-        s3.put_object(
-            Bucket=BUCKET, Key=CHECKPOINT_KEY, Body=pickle.dumps((granules, processed))
-        )
-
-        result = checkpointer.read_checkpoint()
-
-        assert result.granules_to_process == granules
-        assert result.processed_data.equals(processed)
-        assert result.generation == 0
-
     def test_raises_conflict_for_higher_stored_generation(self, s3, checkpointer):
         _put(s3, CheckpointData(
             granules_to_process=[],
