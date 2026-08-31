@@ -20,7 +20,7 @@ from gtiler.common import cmr_query, shape_parser  # noqa: E402
 from gtiler.database.schema import GediProduct  # noqa: E402
 
 FIXTURES = pathlib.Path(__file__).parent
-SHAPE_PATH = pathlib.Path("/projects/my-public-bucket/shapefiles/sabah_box/box.shp")
+SHAPE_PATH = FIXTURES / "shapes" / "sabah_box" / "box.shp"
 START = dt.datetime(2021, 1, 1)
 END = dt.datetime(2021, 12, 31, 23, 59, 59)
 

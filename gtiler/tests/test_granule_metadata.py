@@ -39,6 +39,8 @@ EXPECTED_OUTPUT_COLUMNS = {
     "level2B_url",
     "level4A_url",
     "level4C_url",
+    "time_start",
+    "time_end",
     "geometry",
     "granule_hash",
 }

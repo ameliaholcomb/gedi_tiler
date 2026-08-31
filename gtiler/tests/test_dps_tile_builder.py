@@ -33,8 +33,8 @@ TILE_ID = "N00_W050"
 # Acquisition windows covering each fixture granule's shots, in the form
 # CMR reports them. The two granules fall in different years.
 GRANULE_WINDOWS = {
-    "O15709_01": "2021-09-20T18:00:00Z",
-    "O20346_01": "2022-07-16T20:00:00Z",
+    "O15709_01": ("2021-09-20T18:00:00Z", "2021-09-20T19:33:00Z"),
+    "O20346_01": ("2022-07-16T20:00:00Z", "2022-07-16T21:33:00Z"),
 }
 GRANULE_YEARS = {"O15709_01": 2021, "O20346_01": 2022}
 
@@ -94,8 +94,9 @@ def fixture_metadata():
     path = FIXTURES / f"metadata/tile_id={TILE_ID}/data_0.parquet"
     md = gpd.read_file(path)
     md["quality_filter"] = False
-    md["time_start"] = pd.to_datetime(md["granule_key"].map(GRANULE_WINDOWS))
-    md["time_end"] = md["time_start"] + pd.Timedelta(minutes=93)
+    windows = md["granule_key"].map(GRANULE_WINDOWS)
+    md["time_start"] = pd.to_datetime([w[0] for w in windows], utc=True)
+    md["time_end"] = pd.to_datetime([w[1] for w in windows], utc=True)
     for col in [c for c in md.columns if c.endswith("_url")]:
         md[col] = md[col].map(
             lambda u: str(FIXTURES / "granules" / u.rsplit("/", 1)[1])
