@@ -80,8 +80,12 @@ def dps_tile_builder():
 
 @pytest.fixture
 def fixture_metadata():
+    """Fixture metadata with quality filtering off, as tile_runner would
+    record it for a --no-quality build."""
     path = FIXTURES / f"metadata/tile_id={TILE_ID}/data_0.parquet"
-    return gpd.read_file(path)
+    md = gpd.read_file(path)
+    md["quality_filter"] = False
+    return md
 
 
 @pytest.fixture
@@ -94,7 +98,6 @@ def args(tmp_path):
         generation=0,
         checkpoint_interval=30,
         test=False,
-        quality=False,
     )
 
 
@@ -237,13 +240,7 @@ def _read_output(out_dir: pathlib.Path) -> pd.DataFrame:
 
 class TestMissingProductUrl:
     """When a granule's metadata row has a null product URL, the pipeline
-    still produces the tile but with NaN-filled columns for that product,
-    and quality filtering is disabled tile-wide.
-
-    The fixture h5 files have the first 5 shots/beam patched to fail every
-    QF criterion (see build_granule_fixtures.QUALITY_PATTERN) and the rest
-    patched to pass; that lets these tests verify the QF behavior by
-    counting low-quality survivors in the output.
+    still produces the tile but with NaN-filled columns for that product.
     """
 
     @pytest.fixture
@@ -296,41 +293,6 @@ class TestMissingProductUrl:
         for col in ("elev_lowestmode", "shot_number", "lat_lowestmode"):
             assert df[col].notna().all(), f"{col} should have no NaNs"
 
-    def test_quality_filter_disabled_when_url_missing(
-        self, args, run_pipeline_factory, metadata_missing_l4c
-    ):
-        # The fixture's first 5 shots/beam have quality_flag == 0 (and
-        # other QF criteria set to fail). With args.quality=True but a
-        # missing L4C URL, QF is disabled tile-wide, so those shots must
-        # survive in the output.
-        args.quality = True
-        out = run_pipeline_factory(metadata_missing_l4c)
-        df = _read_output(out)
-        n_low = int((df["quality_flag"] == 0).sum())
-        assert n_low > 0, (
-            "low-quality footprints should survive when QF is disabled "
-            "tile-wide due to a missing product URL"
-        )
-
-    def test_quality_filter_active_when_no_url_missing(
-        self, args, run_pipeline_factory, fixture_metadata
-    ):
-        # Counterpart: with all URLs present and args.quality=True, the
-        # same low-quality footprints (quality_flag == 0) must be filtered
-        # out, while the high-quality footprints survive.
-        args.quality = True
-        out = run_pipeline_factory(fixture_metadata)
-        df = _read_output(out)
-        n_low = int((df["quality_flag"] == 0).sum())
-        assert n_low == 0, (
-            "low-quality footprints should be filtered out when QF is "
-            "active and no product URLs are missing"
-        )
-        assert len(df) > 0, (
-            "expected the high-quality footprints (quality_flag == 1) to "
-            "survive QF"
-        )
-
     def test_outputs_with_and_without_null_url_share_schema(
         self, run_pipeline_factory, fixture_metadata, metadata_missing_l4c
     ):
@@ -369,3 +331,56 @@ class TestMissingProductUrl:
             "granule",
         ):
             assert col in df.columns, f"{col} missing from unified read"
+
+
+class TestQualityFilter:
+    """Quality filtering is driven solely by the metadata's quality_filter
+    column, which tile_runner sets per tile.
+
+    The fixture h5 files have the first 5 shots/beam patched to fail every
+    QF criterion (see build_granule_fixtures.QUALITY_PATTERN) and the rest
+    patched to pass, so the QF behavior shows up as low-quality survivors
+    in the output.
+    """
+
+    @pytest.fixture
+    def metadata_qf_on(self, fixture_metadata):
+        md = fixture_metadata.copy()
+        md["quality_filter"] = True
+        return md
+
+    def test_low_quality_shots_dropped_when_enabled(
+        self, run_pipeline_factory, metadata_qf_on
+    ):
+        df = _read_output(run_pipeline_factory(metadata_qf_on))
+        assert int((df["quality_flag"] == 0).sum()) == 0, (
+            "low-quality footprints should be filtered out when metadata "
+            "enables quality filtering"
+        )
+        assert len(df) > 0, (
+            "expected the high-quality footprints (quality_flag == 1) to "
+            "survive QF"
+        )
+
+    def test_low_quality_shots_kept_when_disabled(
+        self, run_pipeline_factory, fixture_metadata
+    ):
+        df = _read_output(run_pipeline_factory(fixture_metadata))
+        assert int((df["quality_flag"] == 0).sum()) > 0, (
+            "low-quality footprints should survive when metadata disables "
+            "quality filtering"
+        )
+
+    def test_applies_when_a_product_url_is_missing(
+        self, run_pipeline_factory, metadata_qf_on
+    ):
+        # Every QF criterion comes from L2A, so a missing L4C URL must not
+        # change which shots the filter keeps.
+        md = metadata_qf_on.copy()
+        md.loc[md.index[0], "level4C_url"] = None
+        df = _read_output(run_pipeline_factory(md))
+        assert int((df["quality_flag"] == 0).sum()) == 0
+        assert len(df) > 0
+        assert df["wsci"].isna().any(), (
+            "expected NaN-filled L4C columns for the granule with no L4C URL"
+        )

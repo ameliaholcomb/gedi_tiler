@@ -14,12 +14,14 @@ logger = logging.getLogger(__name__)
 class CheckpointData:
     granules_to_process: list
     processed_data: pd.DataFrame
+    quality_filter: bool = True
     generation: int = 0
 
     def __str__(self):
         return f"""
             CheckpointData(\
                 gen={self.generation}, \
+                quality_filter={self.quality_filter}, \
                 remaining={len(self.granules_to_process)} granules, \
                 processed={len(self.processed_data)} shots)"""
 
@@ -53,9 +55,15 @@ class Checkpointer:
             # immediately try to write the checkpoint back to claim ownership
             # of this generation
             self.write_checkpoint(
-                checkpoint.granules_to_process, checkpoint.processed_data
+                checkpoint.granules_to_process,
+                checkpoint.processed_data,
+                checkpoint.quality_filter,
             )
-            return checkpoint.granules_to_process, checkpoint.processed_data
+            return (
+                checkpoint.granules_to_process,
+                checkpoint.processed_data,
+                checkpoint.quality_filter,
+            )
         else:
             return None
 
@@ -66,6 +74,7 @@ class Checkpointer:
         return CheckpointData(
             granules_to_process=checkpoint_tuple[0],
             processed_data=checkpoint_tuple[1],
+            quality_filter=True,
         )
 
     def read_checkpoint(self) -> CheckpointData:
@@ -84,6 +93,7 @@ class Checkpointer:
         self,
         granules_to_process: list,
         processed_data: pd.DataFrame,
+        quality_filter: bool = True,
     ):
         """
         Write the checkpoint to S3 using multipart upload
@@ -93,6 +103,7 @@ class Checkpointer:
             generation=self.generation,
             granules_to_process=granules_to_process,
             processed_data=processed_data,
+            quality_filter=quality_filter,
         )
         logger.info("Writing checkpoint: %s", checkpoint)
         try:
@@ -123,5 +134,5 @@ class Checkpointer:
                     self.generation,
                 )
                 return self.write_checkpoint(
-                    granules_to_process, processed_data
+                    granules_to_process, processed_data, quality_filter
                 )

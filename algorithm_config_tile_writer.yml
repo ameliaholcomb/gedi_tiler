@@ -37,10 +37,6 @@ inputs:
     name: test
     required: false
   - default: ''
-    description: Quality-filter granules before adding to database
-    name: quality
-    required: false
-  - default: ''
     description: Enable DEBUG-level logging (default is INFO). Pass any non-empty value
       to enable.
     name: verbose

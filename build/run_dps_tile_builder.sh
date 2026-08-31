@@ -33,12 +33,7 @@ if [ -n "$6" ]; then
 else
     test=""
 fi
-if [ -n "$7" ]; then
-    quality="--quality"
-else
-    quality=""
-fi
-if [ -n "${8:-}" ]; then
+if [ -n "${7:-}" ]; then
     verbose="--verbose"
 else
     verbose=""
@@ -50,4 +45,4 @@ fi
 # Any output written to the stdout and stderr streams will be
 # automatically captured and placed in the output dir
 
-conda run --live-stream --name pyduck python ${basedir}/../scripts/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --generation ${generation} --checkpoint_interval ${checkpoint_interval} ${test} ${quality} ${verbose}
+conda run --live-stream --name pyduck python ${basedir}/../scripts/dps_tile_builder.py --bucket ${bucket} --prefix ${prefix} --tile_id ${tile_id} --generation ${generation} --checkpoint_interval ${checkpoint_interval} ${test} ${verbose}

@@ -81,7 +81,29 @@ def get_tile_ids_novalidation(bucket, prefix):
             if segment.startswith("tile_id="):
                 tile_ids.append(segment.split("=", 1)[1])     # "N06_W123"
     return tile_ids
-    
+
+
+def check_quality_consistency(con, md_spec: str, quality: bool):
+    """Exit if existing metadata was built with a different quality
+    filtering setting than this run, which would leave the database
+    inconsistently filtered."""
+    mismatched = con.execute(f"""
+        SELECT DISTINCT tile_id FROM read_parquet('{md_spec}')
+        WHERE quality_filter IS DISTINCT FROM {quality}
+    """).fetchall()
+    if mismatched:
+        tile_ids = sorted(x[0] for x in mismatched)
+        logger.warning(
+            "%d existing metadata tiles were built with a different quality "
+            "filtering setting than --quality=%s: %s%s",
+            len(tile_ids),
+            quality,
+            ", ".join(tile_ids[:10]),
+            " ..." if len(tile_ids) > 10 else "",
+        )
+        exit(1)
+
+
 def main(args):
     # Metadata is written first, then data is backfilled by the DPS jobs.
     # DPS jobs can fail, be re-run, etc, but the metadata is only written once.
@@ -133,6 +155,7 @@ def main(args):
     )
     tile_granule_gdf.drop(columns=["index_right"], inplace=True)
     tile_granule_gdf["cmr_access_time"] = pd.Timestamp.now(tz="UTC")
+    tile_granule_gdf["quality_filter"] = args.quality
     required_tiles = set(tile_granule_gdf.tile_id.unique())
 
     # 2. Get existing metadata tiles in S3
@@ -145,6 +168,8 @@ def main(args):
             f"SELECT DISTINCT tile_id FROM read_parquet('{md_spec}')"
         ).fetchall()
         existing_md = {x[0] for x in existing_md}
+        if not args.fast_scan:
+            check_quality_consistency(con, md_spec, args.quality)
 
         tile_granule_gdf = tile_granule_gdf[
             ~tile_granule_gdf.tile_id.isin(existing_md)
@@ -246,7 +271,6 @@ def main(args):
                 tile_id=tile_id,
                 generation=args.job_iteration,
                 checkpoint_interval=25,
-                quality="quality",
             )
         if i >= max_tasks:
             return
@@ -319,7 +343,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fast_scan",
         action="store_true",
-        help="Quickly scan existing tiles in database without checking for valid parquet files.",
+        help=(
+            "Quickly scan existing tiles in database without checking for valid "
+            "parquet files, and skip the quality filtering consistency check."
+        ),
+    )
+    parser.add_argument(
+        "--quality",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply GEDI quality filters to shots as tiles are built. Recorded "
+            "per tile in the metadata and read from there by dps_tile_builder."
+        ),
     )
     parser.add_argument(
         "--required_products",

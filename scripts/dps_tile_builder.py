@@ -90,13 +90,6 @@ def get_cmd_args():
         help="Quick test running over only 2 GEDI granules.",
     )
     p.add_argument(
-        "-q",
-        "--quality",
-        dest="quality",
-        action="store_true",
-        help="Apply quality filters to the data.",
-    )
-    p.add_argument(
         "-v",
         "--verbose",
         dest="verbose",
@@ -239,10 +232,7 @@ def load_granule(
             null s3url (None/NaN) marks the product as missing for this
             granule: the file is not read, and its schema-expanded
             columns are NaN-filled instead.
-        qf: Apply L2A quality filters. Callers should pass False when
-            any product is missing for this granule, since the filter
-            columns may not all be present (run_main disables qf
-            tile-wide when any granule has missing URLs).
+        qf: Apply L2A quality filters.
     """
     available: List[Tuple[Product, str]] = []
     missing: List[Product] = []
@@ -345,8 +335,9 @@ def run_main(args: argparse.Namespace):
             args.tile_id, args.bucket, args.prefix
         )
         processed_data = pd.DataFrame()
+        quality_filter = bool(granules_to_process["quality_filter"].iloc[0])
     else:
-        granules_to_process, processed_data = initial_checkpoint
+        granules_to_process, processed_data, quality_filter = initial_checkpoint
     if args.test:
         tot = len(granules_to_process)
         granules_to_process = granules_to_process.head(2)
@@ -361,22 +352,7 @@ def run_main(args: argparse.Namespace):
     )
     logger.info("Loading metadata and checkpoints took %.1f seconds.", t2 - t1)
 
-    # Quality filtering reads columns from across the joined products, so
-    # if any granule in this tile is missing a product URL we disable QF
-    # tile-wide rather than try to filter rows that have NaN-filled cols.
-    url_cols = ["level2A_url", "level2B_url", "level4A_url", "level4C_url"]
-    has_missing_urls = (
-        granules_to_process[url_cols].isna().any().any()
-        if len(granules_to_process)
-        else False
-    )
-    qf = args.quality and not has_missing_urls
-    if args.quality and has_missing_urls:
-        logger.warning(
-            "Tile %s has granules with missing product URLs; "
-            "disabling quality filtering for the whole tile.",
-            args.tile_id,
-        )
+    logger.info("Quality filtering is %s.", "on" if quality_filter else "off")
 
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
@@ -397,7 +373,7 @@ def run_main(args: argparse.Namespace):
                     (SCHEMA.products[3], row.level4C_url),
                 ],
                 tile=args.tile,
-                qf=qf,
+                qf=quality_filter,
             )
             logger.info(f"Loaded {len(df)} shots in granule {row.granule_key}")
             dfs.append(df)
@@ -405,6 +381,7 @@ def run_main(args: argparse.Namespace):
         checkpointer.write_checkpoint(
             granules_to_process=granules_to_process.iloc[i + batch_size :],
             processed_data=pd.concat(dfs),
+            quality_filter=quality_filter,
         )
     full_df = pd.concat(dfs)
     full_df["tile_id"] = args.tile_id
