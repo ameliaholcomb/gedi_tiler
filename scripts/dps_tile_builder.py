@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 QDEGRADE = [0, 3, 8, 10, 13, 18, 20, 23, 28, 30, 33, 38, 40, 43, 48, 60, 63, 68]
-
+EASE_X_ORIGIN = -17367530.445161499083042
+EASE_Y_ORIGIN = 7314540.830638599582016
+EASE_X_SCALE = 1000.895023349556141
+EASE_Y_SCALE = 1000.895023349562052
 
 def get_cmd_args():
     p = argparse.ArgumentParser(
@@ -351,7 +354,6 @@ def run_main(args: argparse.Namespace):
         "Planning to process %d new granules.", len(granules_to_process)
     )
     logger.info("Loading metadata and checkpoints took %.1f seconds.", t2 - t1)
-
     logger.info("Quality filtering is %s.", "on" if quality_filter else "off")
 
     # Set up access to the ORNL and LP DAACs
@@ -394,10 +396,16 @@ def run_main(args: argparse.Namespace):
         f"ST_MakeBox2D(ST_Point({args.tile.minx}, {args.tile.miny}), "
         f"ST_Point({args.tile.maxx}, {args.tile.maxy}))"
     )
+    con.execute("INSTALL h3 FROM community;")
+    con.load_extension("h3")
     con.sql(f"""--sql
         COPY (
             SELECT *,
-                ST_Point(lon_lowestmode, lat_lowestmode) AS geometry,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03_cell,
+                ST_Point(lat_lowestmode, lon_lowestmode) AS geometry,
+                ST_Transform(geometry, 'EPSG:4326', 'EPSG:6933') AS geom_6933,
+                FLOOR((ST_X(geom_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72})) AS ease_72_x,
+                FLOOR(({EASE_Y_ORIGIN} - ST_Y(geom_6933)) / ({EASE_Y_SCALE * 72})) AS ease_72_y,
                 date_part('year', absolute_time) AS year
             FROM full_df
             ORDER BY ST_Hilbert(geometry, {tile_bounds})
