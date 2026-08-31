@@ -27,6 +27,19 @@ EASE_Y_ORIGIN = 7314540.830638599582016
 EASE_X_SCALE = 1000.895023349556141
 EASE_Y_SCALE = 1000.895023349562052
 
+# Columns read from the tile metadata. The geometry columns are not
+# needed to build a tile, and reading them costs a conversion.
+GRANULE_COLUMNS = [
+    "granule_key",
+    "level2A_url",
+    "level2B_url",
+    "level4A_url",
+    "level4C_url",
+    "time_start",
+    "time_end",
+    "quality_filter",
+]
+
 def get_cmd_args():
     p = argparse.ArgumentParser(
         description="Generate hierarchical H3 database for fast spatial querying."
@@ -60,6 +73,17 @@ def get_cmd_args():
             "Tile ID to process. 1ºx1º degree tiles in the format"
             "[N/S][DD][E/W][DDD], defining the coordinates of the"
             "top-left corner of the tile."
+        ),
+    )
+    p.add_argument(
+        "-y",
+        "--year",
+        dest="year",
+        type=int,
+        required=True,
+        help=(
+            "Year to process. Only footprints acquired in this year are "
+            "written, even when a granule spans New Year."
         ),
     )
     p.add_argument(
@@ -302,18 +326,33 @@ def load_granule(
     return full_df
 
 
-def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
+def load_tile_metadata(con, tile_id: str, bucket: str, prefix: str):
     """Load metadata for a specific tile from S3.
     Args:
         tile_id: Tile ID to load (e.g. N00W000)
         bucket: S3 bucket where the metadata is stored.
         prefix: S3 prefix (folder) where the metadata is stored.
     Returns:
-        GeoDataFrame with the metadata for the specified tile.
+        DataFrame with one row per granule covering the tile.
     """
     md_spec = ducky.metadata_spec(bucket, prefix, tile_id)
-    md_spec = md_spec.replace("*", "data_0")
-    return gpd.read_file(md_spec)
+    columns = ", ".join(GRANULE_COLUMNS)
+    return con.execute(
+        f"SELECT {columns} FROM read_parquet('{md_spec}')"
+    ).df()
+
+
+def select_granules_for_year(granules: pd.DataFrame, year: int) -> pd.DataFrame:
+    """Granules whose acquisition window overlaps the given year.
+
+    A granule spanning New Year is selected by both adjacent years; each
+    job writes only the footprints belonging to its own year.
+    """
+    start = pd.Timestamp(year=year, month=1, day=1, tz="UTC")
+    end = pd.Timestamp(year=year + 1, month=1, day=1, tz="UTC")
+    return granules[
+        (granules["time_start"] < end) & (granules["time_end"] >= start)
+    ]
 
 
 def log_memory(logger, message=""):
@@ -326,19 +365,32 @@ def run_main(args: argparse.Namespace):
     """Main function to create a tile."""
     t1 = time.time()
 
+    con = ducky.init_duckdb()
+
     # Load metadata for the tile
     logger.info("Reading metadata and checkpoints for tile ...")
     checkpointer = checkpoint_lib.Checkpointer(
-        args.bucket, args.prefix, args.tile_id, generation=args.generation
+        args.bucket,
+        args.prefix,
+        args.tile_id,
+        args.year,
+        generation=args.generation,
     )
     initial_checkpoint = checkpointer.initialize()
     if initial_checkpoint is None:
         logger.info("Loading new work plan from metadata ...")
-        granules_to_process = load_tile_metadata(
-            args.tile_id, args.bucket, args.prefix
+        tile_metadata = load_tile_metadata(
+            con, args.tile_id, args.bucket, args.prefix
         )
+        quality_filter = bool(tile_metadata["quality_filter"].iloc[0])
+        granules_to_process = select_granules_for_year(tile_metadata, args.year)
         processed_data = pd.DataFrame()
-        quality_filter = bool(granules_to_process["quality_filter"].iloc[0])
+        logger.info(
+            "%d of the tile's %d granules overlap %d.",
+            len(granules_to_process),
+            len(tile_metadata),
+            args.year,
+        )
     else:
         granules_to_process, processed_data, quality_filter = initial_checkpoint
     if args.test:
@@ -386,18 +438,22 @@ def run_main(args: argparse.Namespace):
             quality_filter=quality_filter,
         )
     full_df = pd.concat(dfs)
+    if len(full_df):
+        # Granules spanning New Year also carry the adjacent year's shots.
+        full_df = full_df[full_df["absolute_time"].dt.year == args.year]
     t3 = time.time()
     logger.info("Loading granules took %.1f seconds.", t3 - t2)
 
     if len(full_df) == 0:
-        marker = ducky.empty_marker_path(args.bucket, args.prefix, args.tile_id)
-        logger.info("No footprints to write. Marking tile empty: %s", marker)
+        marker = ducky.empty_marker_path(
+            args.bucket, args.prefix, args.tile_id, args.year
+        )
+        logger.info("No footprints to write. Marking empty: %s", marker)
         s3_utils.write_empty_file(marker)
         return 0
 
     full_df["tile_id"] = args.tile_id
 
-    con = ducky.init_duckdb()
     aws_prefix = ducky.data_prefix(args.bucket, args.prefix)
     tile_bounds = (
         f"ST_MakeBox2D(ST_Point({args.tile.minx}, {args.tile.miny}), "
@@ -413,7 +469,7 @@ def run_main(args: argparse.Namespace):
                 ST_Transform(geometry, 'EPSG:4326', 'EPSG:6933') AS geom_6933,
                 FLOOR((ST_X(geom_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72})) AS ease_72_x,
                 FLOOR(({EASE_Y_ORIGIN} - ST_Y(geom_6933)) / ({EASE_Y_SCALE * 72})) AS ease_72_y,
-                date_part('year', absolute_time) AS year
+                {args.year} AS year
             FROM full_df
             ORDER BY ST_Hilbert(geometry, {tile_bounds})
         ) TO '{aws_prefix}' (

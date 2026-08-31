@@ -162,7 +162,14 @@ def _parse_granules(granules, use_cloud: bool = False) -> list:
                     break
 
         granule_array.append(
-            [granule_name, granule_url, granule_size, granule_poly]
+            [
+                granule_name,
+                granule_url,
+                granule_size,
+                granule_poly,
+                g["time_start"],
+                g["time_end"],
+            ]
         )
 
     return granule_array
@@ -227,9 +234,18 @@ def query(
 
     df = pd.DataFrame(
         granule_array,
-        columns=["granule_name", "granule_url", "granule_size", "granule_poly"],
+        columns=[
+            "granule_name",
+            "granule_url",
+            "granule_size",
+            "granule_poly",
+            "time_start",
+            "time_end",
+        ],
     )
     df = df[df["granule_poly"] != ""]
+    for col in ("time_start", "time_end"):
+        df[col] = pd.to_datetime(df[col], utc=True, format="ISO8601")
     return gpd.GeoDataFrame(df, geometry=df.granule_poly)
 
 

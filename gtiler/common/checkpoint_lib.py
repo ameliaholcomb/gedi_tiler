@@ -33,10 +33,20 @@ class CheckpointConflict(Exception):
 
 
 class Checkpointer:
-    def __init__(self, bucket: str, prefix: str, tile_id: str, generation: int):
+    def __init__(
+        self,
+        bucket: str,
+        prefix: str,
+        tile_id: str,
+        year: int,
+        generation: int,
+    ):
         self.bucket = bucket
-        self.checkpoint_key = f"{prefix}/checkpoints/{tile_id}/checkpoint.pkl"
+        self.checkpoint_key = (
+            f"{prefix}/checkpoints/{tile_id}/{year}/checkpoint.pkl"
+        )
         self.tile_id = tile_id
+        self.year = year
         self.generation = generation
         self.etag = None
 

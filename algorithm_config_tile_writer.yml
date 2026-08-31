@@ -20,6 +20,11 @@ inputs:
       defining the coordinates of the top-left corner of the tile.
     name: tile_id
     required: true
+  - default: ''
+    description: Year to process. Only footprints acquired in this year are written,
+      even when a granule spans New Year.
+    name: year
+    required: true
   - default: '0'
     description: Generation number for this job. Used for optimistic concurrency control
       of checkpoints. Increment this number to start a new generation of checkpoints,

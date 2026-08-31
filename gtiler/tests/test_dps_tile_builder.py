@@ -30,6 +30,13 @@ from gtiler.database.tiles import Tile
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 TILE_ID = "N00_W050"
+# Acquisition windows covering each fixture granule's shots, in the form
+# CMR reports them. The two granules fall in different years.
+GRANULE_WINDOWS = {
+    "O15709_01": "2021-09-20T18:00:00Z",
+    "O20346_01": "2022-07-16T20:00:00Z",
+}
+GRANULE_YEARS = {"O15709_01": 2021, "O20346_01": 2022}
 
 
 def _import_dps_tile_builder():
@@ -87,6 +94,8 @@ def fixture_metadata():
     path = FIXTURES / f"metadata/tile_id={TILE_ID}/data_0.parquet"
     md = gpd.read_file(path)
     md["quality_filter"] = False
+    md["time_start"] = pd.to_datetime(md["granule_key"].map(GRANULE_WINDOWS))
+    md["time_end"] = md["time_start"] + pd.Timedelta(minutes=93)
     for col in [c for c in md.columns if c.endswith("_url")]:
         md[col] = md[col].map(
             lambda u: str(FIXTURES / "granules" / u.rsplit("/", 1)[1])
@@ -103,6 +112,7 @@ def args(tmp_path):
         prefix="test/prefix",
         tile_id=TILE_ID,
         tile=Tile(TILE_ID),
+        year=GRANULE_YEARS["O15709_01"],
         generation=0,
         checkpoint_interval=30,
         test=False,
@@ -267,36 +277,32 @@ class TestMissingProductUrl:
         files = list((out_dir / f"tile_id={TILE_ID}").glob("year=*/*.parquet"))
         assert files, "expected parquet output despite missing L4C URL"
 
-    def test_both_granules_present_in_output(
-        self, out_dir, metadata_missing_l4c
-    ):
+    def test_only_the_years_granule_is_present(self, out_dir):
         df = _read_output(out_dir)
-        assert set(df["granule"].unique()) == set(
-            metadata_missing_l4c["granule_key"]
-        )
+        assert set(df["granule"].unique()) == {"O15709_01"}
 
-    def test_l4c_columns_null_only_for_missing_granule(
-        self, out_dir, metadata_missing_l4c
-    ):
+    def test_l4c_columns_nan_for_the_missing_granule(self, out_dir):
         df = _read_output(out_dir)
-        missing_key = metadata_missing_l4c.iloc[0]["granule_key"]
-        present_key = metadata_missing_l4c.iloc[1]["granule_key"]
-        missing_df = df[df["granule"] == missing_key]
-        present_df = df[df["granule"] == present_key]
-        assert len(missing_df) > 0 and len(present_df) > 0
-
         # Spot-check one scalar and one quality-flag column from L4C.
         for col in ("wsci", "wsci_quality_flag"):
-            assert missing_df[col].isna().all(), (
+            assert df[col].isna().all(), (
                 f"{col} should be all-NaN for the granule with no L4C URL"
             )
-            assert present_df[col].notna().any(), (
+
+    def test_l4c_columns_present_for_the_unaffected_granule(
+        self, args, run_pipeline_factory, metadata_missing_l4c
+    ):
+        # The other granule keeps its L4C URL, in the following year.
+        args.year = GRANULE_YEARS["O20346_01"]
+        df = _read_output(run_pipeline_factory(metadata_missing_l4c))
+        assert set(df["granule"].unique()) == {"O20346_01"}
+        for col in ("wsci", "wsci_quality_flag"):
+            assert df[col].notna().any(), (
                 f"{col} should have real values for the unaffected granule"
             )
 
-    def test_l2a_columns_unaffected_for_both_granules(self, out_dir):
-        # L2A is still present for both granules — its columns should
-        # contain real values everywhere.
+    def test_l2a_columns_unaffected(self, out_dir):
+        # L2A is present regardless, so its columns have real values.
         df = _read_output(out_dir)
         for col in ("elev_lowestmode", "shot_number", "lat_lowestmode"):
             assert df[col].notna().all(), f"{col} should have no NaNs"
@@ -409,9 +415,72 @@ class TestEmptyTile:
         self, empty_tile_args, run_pipeline_factory, fixture_metadata
     ):
         out = run_pipeline_factory(fixture_metadata)
-        marker = out / f"tile_id={empty_tile_args.tile_id}" / "_EMPTY"
+        marker = (
+            out
+            / f"tile_id={empty_tile_args.tile_id}"
+            / f"year={empty_tile_args.year}"
+            / "_EMPTY"
+        )
         assert marker.is_file(), f"expected an empty marker at {marker}"
         assert marker.stat().st_size == 0
         assert not list(out.glob("**/*.parquet")), (
             "an empty tile should not write a parquet partition"
         )
+
+
+class TestYearSelection:
+    """Each job writes one year. A granule is read by the job for every
+    year its acquisition window overlaps, but contributes only the
+    footprints acquired in that job's year."""
+
+    def test_writes_only_the_requested_year(
+        self, args, run_pipeline_factory, fixture_metadata
+    ):
+        args.year = GRANULE_YEARS["O20346_01"]
+        out = run_pipeline_factory(fixture_metadata)
+        df = _read_output(out)
+        assert set(df["granule"].unique()) == {"O20346_01"}
+        assert set(df["absolute_time"].dt.year) == {args.year}
+
+    def test_partition_is_the_requested_year(
+        self, args, run_pipeline_factory, fixture_metadata
+    ):
+        args.year = GRANULE_YEARS["O20346_01"]
+        out = run_pipeline_factory(fixture_metadata)
+        years = [d.name for d in (out / f"tile_id={TILE_ID}").glob("year=*")]
+        assert years == [f"year={args.year}"]
+
+    def test_year_with_no_granules_marks_empty(
+        self, args, run_pipeline_factory, fixture_metadata
+    ):
+        args.year = 2019
+        out = run_pipeline_factory(fixture_metadata)
+        assert (out / f"tile_id={TILE_ID}" / "year=2019" / "_EMPTY").is_file()
+        assert not list(out.glob("**/*.parquet"))
+
+
+class TestSelectGranulesForYear:
+    def _granules(self, starts, ends):
+        return pd.DataFrame({
+            "granule_key": [f"g{i}" for i in range(len(starts))],
+            "time_start": pd.to_datetime(starts, utc=True),
+            "time_end": pd.to_datetime(ends, utc=True),
+        })
+
+    def test_selects_overlapping_granules(self, dps_tile_builder):
+        g = self._granules(
+            ["2020-06-01T00:00:00Z", "2021-06-01T00:00:00Z"],
+            ["2020-06-01T01:33:00Z", "2021-06-01T01:33:00Z"],
+        )
+        got = dps_tile_builder.select_granules_for_year(g, 2021)
+        assert list(got["granule_key"]) == ["g1"]
+
+    def test_granule_spanning_new_year_is_selected_by_both_years(
+        self, dps_tile_builder
+    ):
+        g = self._granules(
+            ["2023-12-31T23:30:00Z"], ["2024-01-01T01:03:00Z"]
+        )
+        for year in (2023, 2024):
+            got = dps_tile_builder.select_granules_for_year(g, year)
+            assert list(got["granule_key"]) == ["g0"], year

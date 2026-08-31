@@ -12,8 +12,9 @@ from gtiler.common.checkpoint_lib import CheckpointData, CheckpointConflict, Che
 BUCKET = "test-bucket"
 PREFIX = "test/prefix"
 TILE_ID = "tile-001"
+YEAR = 2020
 GENERATION = 5
-CHECKPOINT_KEY = f"{PREFIX}/checkpoints/{TILE_ID}/checkpoint.pkl"
+CHECKPOINT_KEY = f"{PREFIX}/checkpoints/{TILE_ID}/{YEAR}/checkpoint.pkl"
 
 
 @pytest.fixture
@@ -26,7 +27,9 @@ def s3():
 
 @pytest.fixture
 def checkpointer():
-    return Checkpointer(bucket=BUCKET, prefix=PREFIX, tile_id=TILE_ID, generation=GENERATION)
+    return Checkpointer(
+        bucket=BUCKET, prefix=PREFIX, tile_id=TILE_ID, year=YEAR, generation=GENERATION
+    )
 
 
 @pytest.fixture
@@ -88,11 +91,11 @@ class TestCheckpointData:
 
 class TestCheckpointerConstruction:
     def test_checkpoint_key_format(self):
-        cp = Checkpointer(BUCKET, PREFIX, TILE_ID, GENERATION)
+        cp = Checkpointer(BUCKET, PREFIX, TILE_ID, YEAR, GENERATION)
         assert cp.checkpoint_key == CHECKPOINT_KEY
 
     def test_initial_etag_is_none(self):
-        assert Checkpointer(BUCKET, PREFIX, TILE_ID, GENERATION).etag is None
+        assert Checkpointer(BUCKET, PREFIX, TILE_ID, YEAR, GENERATION).etag is None
 
 
 # ---------------------------------------------------------------------------

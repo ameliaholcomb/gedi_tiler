@@ -41,6 +41,9 @@ def init_duckdb(temp_dir: str = None):
     con.execute("SET enable_progress_bar = true;")
     con.execute("SET preserve_insertion_order = false;")
     con.execute("SET memory_limit = '8GB';")
+    # date_part on a timestamptz follows the session zone, and the year
+    # it returns decides which partition a footprint lands in.
+    con.execute("SET TimeZone = 'UTC';")
     if temp_dir:
         con.sql(f"SET temp_directory='{temp_dir}'")
     con.sql("SET max_temp_directory_size = '100GB'")
@@ -112,13 +115,16 @@ def metadata_prefix(bucket, prefix):
     return f"s3://{bucket}/{prefix}/metadata/"
 
 
-def empty_marker_path(bucket, prefix, tile):
-    return f"{data_prefix(bucket, prefix)}{TILE_ID}={tile}/{EMPTY_MARKER}"
+def empty_marker_path(bucket, prefix, tile, year):
+    return (
+        f"{data_prefix(bucket, prefix)}{TILE_ID}={tile}/{YEAR}={year}/"
+        f"{EMPTY_MARKER}"
+    )
 
 
 def empty_marker_spec(bucket, prefix):
     """Glob matching every empty marker in the database."""
-    return f"{data_prefix(bucket, prefix)}{TILE_ID}=*/{EMPTY_MARKER}"
+    return f"{data_prefix(bucket, prefix)}{TILE_ID}=*/{YEAR}=*/{EMPTY_MARKER}"
 
 
 def data_spec(bucket, prefix, tile=None, year=None):
