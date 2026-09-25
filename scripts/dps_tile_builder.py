@@ -303,6 +303,12 @@ def load_granule(
 
     # Add derived data columns
     full_df["granule"] = granule
+    # Source file name per product, null where the product is missing.
+    # The string dtype keeps an all-null column VARCHAR in the output.
+    for product_schema, s3url in product_files:
+        col = f"root_file_{product_schema.product_level.name.lower()}"
+        name = None if s3url is None or pd.isna(s3url) else s3url.rsplit("/", 1)[1]
+        full_df[col] = pd.Series(name, index=full_df.index, dtype="string")
     gedi_count_start = pd.to_datetime("2018-01-01T00:00:00Z")
     full_df["absolute_time"] = gedi_count_start + pd.to_timedelta(
         full_df["delta_time_l2a"], "seconds"

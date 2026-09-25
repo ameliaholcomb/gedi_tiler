@@ -226,6 +226,10 @@ class TestRunMain:
             "granule",              # derived
             "absolute_time",        # derived
             "beam_name",            # derived
+            "root_file_l2a",        # derived
+            "root_file_l2b",
+            "root_file_l4a",
+            "root_file_l4c",
             # derived in run_main SQL
             "geometry",
             "geometry_6933",
@@ -262,6 +266,17 @@ class TestRunMain:
                OR ST_Y(geometry) <> lat_lowestmode
         """).fetchone()[0]
         assert bad == 0
+
+    def test_root_files_match_metadata_urls(
+        self, run_pipeline, fixture_metadata
+    ):
+        df = _read_output(run_pipeline)
+        md = fixture_metadata.set_index("granule_key")
+        for level in ("2A", "2B", "4A", "4C"):
+            expected = df["granule"].map(
+                md[f"level{level}_url"].str.rsplit("/", n=1).str[1]
+            )
+            assert (df[f"root_file_l{level.lower()}"] == expected).all()
 
     def test_granule_column_matches_fixture_keys(
         self, run_pipeline, fixture_metadata
@@ -331,6 +346,16 @@ class TestMissingProductUrl:
             assert df[col].notna().any(), (
                 f"{col} should have real values for the unaffected granule"
             )
+
+    def test_root_file_null_for_the_missing_product(self, out_dir):
+        con = duckdb.connect()
+        (n, n_null, typ) = con.sql(f"""
+            SELECT count(*), count(*) FILTER (root_file_l4c IS NULL),
+                   typeof(any_value(root_file_l4c))
+            FROM '{out_dir}/tile_id={TILE_ID}/year=*/*.parquet'
+        """).fetchone()
+        assert n_null == n > 0
+        assert typ == "VARCHAR"
 
     def test_l2a_columns_unaffected(self, out_dir):
         # L2A is present regardless, so its columns have real values.

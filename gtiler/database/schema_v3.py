@@ -475,7 +475,7 @@ SCHEMA = Table(
             SDS_Name="N/A",
             description="Name of the L2A file for this GEDI shot",
             product_level=[GediProduct.L2A],
-            dtype="string[48]",
+            dtype="string[57]",
             unit="N/A"
         ),
         DerivedColumn(
@@ -483,7 +483,7 @@ SCHEMA = Table(
             SDS_Name="N/A",
             description="Name of the L2B file for this GEDI shot",
             product_level=[GediProduct.L2B],
-            dtype="string[48]",
+            dtype="string[57]",
             unit="N/A"
         ),
         DerivedColumn(
@@ -491,7 +491,7 @@ SCHEMA = Table(
             SDS_Name="N/A",
             description="Name of the L4A file for this GEDI shot",
             product_level=[GediProduct.L4A],
-            dtype="string[48]",
+            dtype="string[57]",
             unit="N/A"
         ),
         DerivedColumn(
@@ -499,7 +499,7 @@ SCHEMA = Table(
             SDS_Name="N/A",
             description="Name of the L4C file for this GEDI shot",
             product_level=[GediProduct.L4C],
-            dtype="string[48]",
+            dtype="string[57]",
             unit="N/A"
         ),
     ]
