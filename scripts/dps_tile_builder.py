@@ -36,6 +36,7 @@ GRANULE_COLUMNS = [
     "level4C_url",
     "time_start",
     "time_end",
+    "quality_filter",
 ]
 
 def get_cmd_args():
@@ -248,6 +249,7 @@ def load_granule(
     granule: str,
     product_files: List[Tuple[Product, str]],
     tile: Tile,
+    qf: bool,
 ) -> gpd.GeoDataFrame:
     """Load dataframes for all products and join into a single geodataframe.
     Args:
@@ -256,6 +258,7 @@ def load_granule(
             null s3url (None/NaN) marks the product as missing for this
             granule: the file is not read, and its schema-expanded
             columns are NaN-filled instead.
+        qf: Keep only shots with l2a_quality_flag_rel3_l2a == 1.
     """
     available: List[Tuple[Product, str]] = []
     missing: List[Product] = []
@@ -313,6 +316,8 @@ def load_granule(
     full_df["absolute_time"] = gedi_count_start + pd.to_timedelta(
         full_df["delta_time_l2a"], "seconds"
     )
+    if qf:
+        full_df = full_df[full_df["l2a_quality_flag_rel3_l2a"] == 1]
     # make shot_number a column now that the join is finished
     full_df.reset_index(inplace=True)
     return full_df
@@ -375,6 +380,7 @@ def run_main(args: argparse.Namespace):
             con, args.tile_id, args.bucket, args.prefix
         )
         granules_to_process = select_granules_for_year(tile_metadata, args.year)
+        quality_filter = bool(tile_metadata["quality_filter"].iloc[0])
         processed_data = pd.DataFrame()
         logger.info(
             "%d of the tile's %d granules overlap %d.",
@@ -383,7 +389,7 @@ def run_main(args: argparse.Namespace):
             args.year,
         )
     else:
-        granules_to_process, processed_data, _ = initial_checkpoint
+        granules_to_process, processed_data, quality_filter = initial_checkpoint
     if args.test:
         tot = len(granules_to_process)
         granules_to_process = granules_to_process.head(2)
@@ -397,6 +403,7 @@ def run_main(args: argparse.Namespace):
         "Planning to process %d new granules.", len(granules_to_process)
     )
     logger.info("Loading metadata and checkpoints took %.1f seconds.", t2 - t1)
+    logger.info("Quality filtering is %s.", "on" if quality_filter else "off")
 
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
@@ -417,6 +424,7 @@ def run_main(args: argparse.Namespace):
                     (SCHEMA.products[3], row.level4C_url),
                 ],
                 tile=args.tile,
+                qf=quality_filter,
             )
             logger.info(f"Loaded {len(df)} shots in granule {row.granule_key}")
             dfs.append(df)
@@ -424,6 +432,7 @@ def run_main(args: argparse.Namespace):
         checkpointer.write_checkpoint(
             granules_to_process=granules_to_process.iloc[i + batch_size :],
             processed_data=pd.concat(dfs),
+            quality_filter=quality_filter,
         )
     full_df = pd.concat(dfs)
     if len(full_df):

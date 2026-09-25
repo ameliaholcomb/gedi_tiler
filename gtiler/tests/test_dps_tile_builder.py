@@ -87,11 +87,13 @@ def dps_tile_builder():
 
 @pytest.fixture
 def fixture_metadata():
-    """Fixture metadata. The stored granule URLs are absolute paths from
-    the machine that built the fixtures, so resolve them against this
-    checkout's granule directory."""
+    """Fixture metadata with quality filtering off, as tile_runner would
+    record it for a --no-quality build. The stored granule URLs are
+    absolute paths from the machine that built the fixtures, so resolve
+    them against this checkout's granule directory."""
     path = FIXTURES / f"metadata/tile_id={TILE_ID}/data_0.parquet"
     md = gpd.read_file(path)
+    md["quality_filter"] = False
     windows = md["granule_key"].map(GRANULE_WINDOWS)
     md["time_start"] = pd.to_datetime([w[0] for w in windows], utc=True)
     md["time_end"] = pd.to_datetime([w[1] for w in windows], utc=True)
@@ -401,6 +403,60 @@ class TestMissingProductUrl:
             "granule",
         ):
             assert col in df.columns, f"{col} missing from unified read"
+
+
+class TestQualityFilter:
+    """Quality filtering is driven solely by the metadata's quality_filter
+    column, which tile_runner sets per tile, and keeps only shots with
+    l2a_quality_flag_rel3_l2a == 1.
+
+    The fixture shots are unmodified V003 data, which has both passing
+    and failing shots in each granule.
+    """
+
+    QF = "l2a_quality_flag_rel3_l2a"
+
+    @pytest.fixture
+    def metadata_qf_on(self, fixture_metadata):
+        md = fixture_metadata.copy()
+        md["quality_filter"] = True
+        return md
+
+    def test_low_quality_shots_dropped_when_enabled(
+        self, run_pipeline_factory, metadata_qf_on
+    ):
+        df = _read_output(run_pipeline_factory(metadata_qf_on))
+        assert len(df) > 0
+        assert (df[self.QF] == 1).all()
+
+    def test_low_quality_shots_kept_when_disabled(
+        self, run_pipeline_factory, fixture_metadata
+    ):
+        df = _read_output(run_pipeline_factory(fixture_metadata))
+        assert (df[self.QF] == 0).any()
+
+    def test_only_the_l2a_flag_is_used(
+        self, run_pipeline_factory, fixture_metadata, metadata_qf_on
+    ):
+        # Shots failing only other criteria (e.g. sensitivity) survive.
+        unfiltered = _read_output(
+            run_pipeline_factory(fixture_metadata, subdir="off")
+        )
+        filtered = _read_output(run_pipeline_factory(metadata_qf_on, subdir="on"))
+        expected = set(unfiltered.loc[unfiltered[self.QF] == 1, "shot_number"])
+        assert set(filtered["shot_number"]) == expected
+
+    def test_applies_when_a_product_url_is_missing(
+        self, run_pipeline_factory, metadata_qf_on
+    ):
+        # The QF column comes from L2A, so a missing L4C URL must not
+        # change which shots the filter keeps.
+        md = metadata_qf_on.copy()
+        md.loc[md.index[0], "level4C_url"] = None
+        df = _read_output(run_pipeline_factory(md))
+        assert len(df) > 0
+        assert (df[self.QF] == 1).all()
+        assert df["wsci_l4c"].isna().all()
 
 
 class TestEmptyTile:
