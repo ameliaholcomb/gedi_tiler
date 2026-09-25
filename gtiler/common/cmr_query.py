@@ -14,12 +14,13 @@ from gtiler.database.schema_v2 import GediProduct
 CMR_URL = "https://cmr.earthdata.nasa.gov/search/"
 GRANULE_SEARCH_URL = CMR_URL + "granules.json"
 CMR_DT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# Version 3 (V003) collections.
 CMR_PROJECT_IDS = {
-    GediProduct.L2A: "C2142771958-LPCLOUD",
-    GediProduct.L2B: "C2142776747-LPCLOUD",
-    GediProduct.L3: "C2153683336-ORNL_CLOUD",
-    GediProduct.L4A: "C2237824918-ORNL_CLOUD",
-    GediProduct.L4C: "C3049900163-ORNL_CLOUD",
+    GediProduct.L2A: "C3974616071-LPCLOUD",
+    GediProduct.L2B: "C3974616135-LPCLOUD",
+    GediProduct.L3: "C4322280365-ORNL_CLOUD",
+    GediProduct.L4A: "C4212593885-ORNL_CLOUD",
+    GediProduct.L4C: "C4302347663-ORNL_CLOUD",
 }
 
 
@@ -122,10 +123,8 @@ def _parse_granules(granules, use_cloud: bool = False) -> list:
         if not g["online_access_flag"]:
             continue
 
-        if "LP" in g["data_center"]:
-            granule_name = g["producer_granule_id"]
-        if "ORNL" in g["data_center"]:
-            granule_name = g["title"].split(".", maxsplit=2)[1]
+        # e.g. GEDI02_A_..._V003.h5 (LP) or GEDI04_A_..._V003 (ORNL)
+        granule_name = g["producer_granule_id"]
 
         granule_url = ""
         granule_poly = ""
