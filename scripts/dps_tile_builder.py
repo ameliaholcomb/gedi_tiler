@@ -465,8 +465,11 @@ def run_main(args: argparse.Namespace):
         COPY (
             SELECT *,
                 h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03_cell,
-                ST_Point(lat_lowestmode, lon_lowestmode) AS geometry,
-                ST_Transform(geometry, 'EPSG:4326', 'EPSG:6933') AS geom_6933,
+                -- OGC:CRS84 is WGS 84 in lon/lat order, which DuckDB,
+                -- GeoParquet and GDAL all agree on (EPSG:4326 is lat/lon
+                -- in DuckDB unless geometry_always_xy is set).
+                ST_Point(lon_lowestmode, lat_lowestmode)::GEOMETRY('OGC:CRS84') AS geometry,
+                ST_Transform(geometry, 'EPSG:6933') AS geom_6933,
                 FLOOR((ST_X(geom_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72})) AS ease_72_x,
                 FLOOR(({EASE_Y_ORIGIN} - ST_Y(geom_6933)) / ({EASE_Y_SCALE * 72})) AS ease_72_y,
                 {args.year} AS year
