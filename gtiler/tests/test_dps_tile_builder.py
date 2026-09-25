@@ -87,13 +87,11 @@ def dps_tile_builder():
 
 @pytest.fixture
 def fixture_metadata():
-    """Fixture metadata with quality filtering off, as tile_runner would
-    record it for a --no-quality build. The stored granule URLs are
-    absolute paths from the machine that built the fixtures, so resolve
-    them against this checkout's granule directory."""
+    """Fixture metadata. The stored granule URLs are absolute paths from
+    the machine that built the fixtures, so resolve them against this
+    checkout's granule directory."""
     path = FIXTURES / f"metadata/tile_id={TILE_ID}/data_0.parquet"
     md = gpd.read_file(path)
-    md["quality_filter"] = False
     windows = md["granule_key"].map(GRANULE_WINDOWS)
     md["time_start"] = pd.to_datetime([w[0] for w in windows], utc=True)
     md["time_end"] = pd.to_datetime([w[1] for w in windows], utc=True)
@@ -221,17 +219,49 @@ class TestRunMain:
             "shot_number",
             "lat_lowestmode",
             "lon_lowestmode",
-            "elev_lowestmode",   # L2A
-            "cover",             # L2B
-            "agbd",              # L4A
-            "wsci",              # L4C
-            "granule",           # derived
-            "absolute_time",     # derived
-            "beam_name",         # derived
-            "geometry",          # derived (added in run_main SQL)
+            "elev_lowestmode_l2a",  # L2A
+            "cover_l2b",            # L2B
+            "agbd_l4a",             # L4A
+            "wsci_l4c",             # L4C
+            "granule",              # derived
+            "absolute_time",        # derived
+            "beam_name",            # derived
+            # derived in run_main SQL
+            "geometry",
+            "geometry_6933",
+            "ease_72km_x",
+            "ease_72km_y",
+            "h3_12",
+            "h3_03",
         }
         missing = expected - cols
         assert not missing, f"missing expected columns: {missing}"
+
+    def test_geometry_and_grid_column_types(self, run_pipeline):
+        con = duckdb.connect()
+        con.load_extension("spatial")
+        types = dict(
+            con.sql(f"""
+                SELECT column_name, column_type
+                FROM (DESCRIBE SELECT * FROM '{_parquet_glob(run_pipeline)}')
+            """).fetchall()
+        )
+        assert types["geometry"] == "GEOMETRY('OGC:CRS84')"
+        assert types["geometry_6933"] == "GEOMETRY('EPSG:6933')"
+        assert types["ease_72km_x"] == "SMALLINT"
+        assert types["ease_72km_y"] == "SMALLINT"
+        assert types["h3_12"] == "UBIGINT"
+        assert types["h3_03"] == "UBIGINT"
+
+    def test_geometry_is_lon_lat(self, run_pipeline):
+        con = duckdb.connect()
+        con.load_extension("spatial")
+        bad = con.sql(f"""
+            SELECT count(*) FROM '{_parquet_glob(run_pipeline)}'
+            WHERE ST_X(geometry) <> lon_lowestmode
+               OR ST_Y(geometry) <> lat_lowestmode
+        """).fetchone()[0]
+        assert bad == 0
 
     def test_granule_column_matches_fixture_keys(
         self, run_pipeline, fixture_metadata
@@ -285,7 +315,7 @@ class TestMissingProductUrl:
     def test_l4c_columns_nan_for_the_missing_granule(self, out_dir):
         df = _read_output(out_dir)
         # Spot-check one scalar and one quality-flag column from L4C.
-        for col in ("wsci", "wsci_quality_flag"):
+        for col in ("wsci_l4c", "l4c_quality_flag_rel3_l4c"):
             assert df[col].isna().all(), (
                 f"{col} should be all-NaN for the granule with no L4C URL"
             )
@@ -297,7 +327,7 @@ class TestMissingProductUrl:
         args.year = GRANULE_YEARS["O20346_01"]
         df = _read_output(run_pipeline_factory(metadata_missing_l4c))
         assert set(df["granule"].unique()) == {"O20346_01"}
-        for col in ("wsci", "wsci_quality_flag"):
+        for col in ("wsci_l4c", "l4c_quality_flag_rel3_l4c"):
             assert df[col].notna().any(), (
                 f"{col} should have real values for the unaffected granule"
             )
@@ -305,7 +335,7 @@ class TestMissingProductUrl:
     def test_l2a_columns_unaffected(self, out_dir):
         # L2A is present regardless, so its columns have real values.
         df = _read_output(out_dir)
-        for col in ("elev_lowestmode", "shot_number", "lat_lowestmode"):
+        for col in ("elev_lowestmode_l2a", "shot_number", "lat_lowestmode"):
             assert df[col].notna().all(), f"{col} should have no NaNs"
 
     def test_outputs_with_and_without_null_url_share_schema(
@@ -338,67 +368,14 @@ class TestMissingProductUrl:
         # read — including L4C, which is NaN-filled in one of the two
         # inputs.
         for col in (
-            "elev_lowestmode",  # L2A
-            "cover",            # L2B
-            "agbd",             # L4A
-            "wsci",             # L4C
-            "wsci_quality_flag",
+            "elev_lowestmode_l2a",  # L2A
+            "cover_l2b",            # L2B
+            "agbd_l4a",             # L4A
+            "wsci_l4c",             # L4C
+            "l4c_quality_flag_rel3_l4c",
             "granule",
         ):
             assert col in df.columns, f"{col} missing from unified read"
-
-
-class TestQualityFilter:
-    """Quality filtering is driven solely by the metadata's quality_filter
-    column, which tile_runner sets per tile.
-
-    The fixture h5 files have the first 5 shots/beam patched to fail every
-    QF criterion (see build_granule_fixtures.QUALITY_PATTERN) and the rest
-    patched to pass, so the QF behavior shows up as low-quality survivors
-    in the output.
-    """
-
-    @pytest.fixture
-    def metadata_qf_on(self, fixture_metadata):
-        md = fixture_metadata.copy()
-        md["quality_filter"] = True
-        return md
-
-    def test_low_quality_shots_dropped_when_enabled(
-        self, run_pipeline_factory, metadata_qf_on
-    ):
-        df = _read_output(run_pipeline_factory(metadata_qf_on))
-        assert int((df["quality_flag"] == 0).sum()) == 0, (
-            "low-quality footprints should be filtered out when metadata "
-            "enables quality filtering"
-        )
-        assert len(df) > 0, (
-            "expected the high-quality footprints (quality_flag == 1) to "
-            "survive QF"
-        )
-
-    def test_low_quality_shots_kept_when_disabled(
-        self, run_pipeline_factory, fixture_metadata
-    ):
-        df = _read_output(run_pipeline_factory(fixture_metadata))
-        assert int((df["quality_flag"] == 0).sum()) > 0, (
-            "low-quality footprints should survive when metadata disables "
-            "quality filtering"
-        )
-
-    def test_applies_when_a_product_url_is_missing(
-        self, run_pipeline_factory, metadata_qf_on
-    ):
-        # Every QF criterion comes from L2A, so a missing L4C URL must not
-        # change which shots the filter keeps.
-        md = metadata_qf_on.copy()
-        md.loc[md.index[0], "level4C_url"] = None
-        df = _read_output(run_pipeline_factory(md))
-        assert int((df["quality_flag"] == 0).sum()) == 0
-        assert len(df) > 0
-        assert df["wsci"].isna().any(), (
-            "expected NaN-filled L4C columns for the granule with no L4C URL"
-        )
 
 
 class TestEmptyTile:

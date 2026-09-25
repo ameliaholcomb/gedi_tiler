@@ -15,13 +15,12 @@ from gtiler.database import ducky
 from gtiler.database.tiles import Tile
 from gtiler.common import s3_utils
 from gtiler.common import checkpoint_lib
-from gtiler.database.schema_v2 import SCHEMA
-from gtiler.database.schema_v2 import Product, GeometryColumn  # typing only
+from gtiler.database.schema_v3 import SCHEMA
+from gtiler.database.schema_v3 import Product, GeometryColumn  # typing only
 
 logger = logging.getLogger(__name__)
 
 
-QDEGRADE = [0, 3, 8, 10, 13, 18, 20, 23, 28, 30, 33, 38, 40, 43, 48, 60, 63, 68]
 EASE_X_ORIGIN = -17367530.445161499083042
 EASE_Y_ORIGIN = 7314540.830638599582016
 EASE_X_SCALE = 1000.895023349556141
@@ -37,7 +36,6 @@ GRANULE_COLUMNS = [
     "level4C_url",
     "time_start",
     "time_end",
-    "quality_filter",
 ]
 
 def get_cmd_args():
@@ -250,7 +248,6 @@ def load_granule(
     granule: str,
     product_files: List[Tuple[Product, str]],
     tile: Tile,
-    qf: bool = True,
 ) -> gpd.GeoDataFrame:
     """Load dataframes for all products and join into a single geodataframe.
     Args:
@@ -259,7 +256,6 @@ def load_granule(
             null s3url (None/NaN) marks the product as missing for this
             granule: the file is not read, and its schema-expanded
             columns are NaN-filled instead.
-        qf: Apply L2A quality filters.
     """
     available: List[Tuple[Product, str]] = []
     missing: List[Product] = []
@@ -309,18 +305,8 @@ def load_granule(
     full_df["granule"] = granule
     gedi_count_start = pd.to_datetime("2018-01-01T00:00:00Z")
     full_df["absolute_time"] = gedi_count_start + pd.to_timedelta(
-        full_df["delta_time"], "seconds"
+        full_df["delta_time_l2a"], "seconds"
     )
-    if qf:
-        full_df = full_df[
-            (full_df["quality_flag"] == 1)
-            & (full_df["sensitivity"] >= 0.9)
-            & (full_df["sensitivity"] <= 1.0)
-            & (full_df["sensitivity_a2"] > 0.95)
-            & (full_df["sensitivity_a2"] <= 1.0)
-            & (full_df["degrade_flag"].isin(QDEGRADE))
-            & (full_df["surface_flag"] == 1)
-        ]
     # make shot_number a column now that the join is finished
     full_df.reset_index(inplace=True)
     return full_df
@@ -382,7 +368,6 @@ def run_main(args: argparse.Namespace):
         tile_metadata = load_tile_metadata(
             con, args.tile_id, args.bucket, args.prefix
         )
-        quality_filter = bool(tile_metadata["quality_filter"].iloc[0])
         granules_to_process = select_granules_for_year(tile_metadata, args.year)
         processed_data = pd.DataFrame()
         logger.info(
@@ -392,7 +377,7 @@ def run_main(args: argparse.Namespace):
             args.year,
         )
     else:
-        granules_to_process, processed_data, quality_filter = initial_checkpoint
+        granules_to_process, processed_data, _ = initial_checkpoint
     if args.test:
         tot = len(granules_to_process)
         granules_to_process = granules_to_process.head(2)
@@ -406,7 +391,6 @@ def run_main(args: argparse.Namespace):
         "Planning to process %d new granules.", len(granules_to_process)
     )
     logger.info("Loading metadata and checkpoints took %.1f seconds.", t2 - t1)
-    logger.info("Quality filtering is %s.", "on" if quality_filter else "off")
 
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
@@ -427,7 +411,6 @@ def run_main(args: argparse.Namespace):
                     (SCHEMA.products[3], row.level4C_url),
                 ],
                 tile=args.tile,
-                qf=quality_filter,
             )
             logger.info(f"Loaded {len(df)} shots in granule {row.granule_key}")
             dfs.append(df)
@@ -435,7 +418,6 @@ def run_main(args: argparse.Namespace):
         checkpointer.write_checkpoint(
             granules_to_process=granules_to_process.iloc[i + batch_size :],
             processed_data=pd.concat(dfs),
-            quality_filter=quality_filter,
         )
     full_df = pd.concat(dfs)
     if len(full_df):
@@ -464,14 +446,15 @@ def run_main(args: argparse.Namespace):
     con.sql(f"""--sql
         COPY (
             SELECT *,
-                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03_cell,
                 -- OGC:CRS84 is WGS 84 in lon/lat order, which DuckDB,
                 -- GeoParquet and GDAL all agree on (EPSG:4326 is lat/lon
                 -- in DuckDB unless geometry_always_xy is set).
                 ST_Point(lon_lowestmode, lat_lowestmode)::GEOMETRY('OGC:CRS84') AS geometry,
-                ST_Transform(geometry, 'EPSG:6933') AS geom_6933,
-                FLOOR((ST_X(geom_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72})) AS ease_72_x,
-                FLOOR(({EASE_Y_ORIGIN} - ST_Y(geom_6933)) / ({EASE_Y_SCALE * 72})) AS ease_72_y,
+                ST_Transform(geometry, 'EPSG:6933') AS geometry_6933,
+                FLOOR((ST_X(geometry_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72}))::SMALLINT AS ease_72km_x,
+                FLOOR(({EASE_Y_ORIGIN} - ST_Y(geometry_6933)) / ({EASE_Y_SCALE * 72}))::SMALLINT AS ease_72km_y,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 12) AS h3_12,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03,
                 {args.year} AS year
             FROM full_df
             ORDER BY ST_Hilbert(geometry, {tile_bounds})
