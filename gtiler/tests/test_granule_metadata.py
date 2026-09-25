@@ -19,7 +19,7 @@ import pytest
 from unittest.mock import patch
 
 from gtiler.common import cmr_query, granule_metadata
-from gtiler.database.schema import GediProduct
+from gtiler.database.schema_v2 import GediProduct
 
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "cmr_query"

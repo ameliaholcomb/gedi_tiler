@@ -17,7 +17,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from gtiler.common import cmr_query, shape_parser  # noqa: E402
-from gtiler.database.schema import GediProduct  # noqa: E402
+from gtiler.database.schema_v2 import GediProduct  # noqa: E402
 
 FIXTURES = pathlib.Path(__file__).parent
 SHAPE_PATH = FIXTURES / "shapes" / "sabah_box" / "box.shp"

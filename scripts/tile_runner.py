@@ -11,7 +11,7 @@ from maap.maap import MAAP
 from gtiler.common import shape_parser, s3_utils
 from gtiler.common.granule_metadata import get_granule_metadata
 from gtiler.database import ducky, tiles
-from gtiler.database.schema import GediProduct
+from gtiler.database.schema_v2 import GediProduct
 
 logger = logging.getLogger(__name__)
 

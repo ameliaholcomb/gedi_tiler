@@ -7,7 +7,7 @@ import pandas as pd
 from typing import List, Optional
 
 from gtiler.common import cmr_query, granule_name
-from gtiler.database.schema import GediProduct
+from gtiler.database.schema_v2 import GediProduct
 
 logger = logging.getLogger(__name__)
 

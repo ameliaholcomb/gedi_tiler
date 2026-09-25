@@ -20,7 +20,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from gtiler.common import s3_utils  # noqa: E402
-from gtiler.database.schema import SCHEMA  # noqa: E402
+from gtiler.database.schema_v2 import SCHEMA  # noqa: E402
 from gtiler.database.tiles import Tile  # noqa: E402
 
 FIXTURES = pathlib.Path(__file__).parent

@@ -15,8 +15,8 @@ from gtiler.database import ducky
 from gtiler.database.tiles import Tile
 from gtiler.common import s3_utils
 from gtiler.common import checkpoint_lib
-from gtiler.database.schema import SCHEMA
-from gtiler.database.schema import Product, GeometryColumn  # typing only
+from gtiler.database.schema_v2 import SCHEMA
+from gtiler.database.schema_v2 import Product, GeometryColumn  # typing only
 
 logger = logging.getLogger(__name__)
 
