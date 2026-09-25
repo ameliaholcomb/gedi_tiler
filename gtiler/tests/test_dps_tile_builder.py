@@ -259,6 +259,33 @@ class TestRunMain:
         assert types["h3_12"] == "UBIGINT"
         assert types["h3_03"] == "UBIGINT"
 
+    def test_rows_are_in_hilbert_order(self, run_pipeline):
+        tile = Tile(TILE_ID)
+        con = duckdb.connect()
+        con.load_extension("spatial")
+        bad = con.sql(f"""
+            SELECT count(*) FROM (
+                SELECT h < lag(h) OVER (
+                    PARTITION BY filename ORDER BY file_row_number
+                ) AS out_of_order
+                FROM (
+                    SELECT filename, file_row_number, ST_Hilbert(
+                        geometry,
+                        ST_MakeBox2D(
+                            ST_Point({tile.minx}, {tile.miny}),
+                            ST_Point({tile.maxx}, {tile.maxy})
+                        )
+                    ) AS h
+                    FROM read_parquet(
+                        '{_parquet_glob(run_pipeline)}',
+                        filename = true, file_row_number = true
+                    )
+                )
+            )
+            WHERE out_of_order
+        """).fetchone()[0]
+        assert bad == 0
+
     def test_geometry_is_lon_lat(self, run_pipeline):
         con = duckdb.connect()
         con.load_extension("spatial")
@@ -516,6 +543,22 @@ class TestYearSelection:
         out = run_pipeline_factory(fixture_metadata)
         assert (out / f"tile_id={TILE_ID}" / "year=2019" / "_EMPTY").is_file()
         assert not list(out.glob("**/*.parquet"))
+
+
+class TestGranuleDownload:
+    def test_download_is_removed_after_reading(
+        self, dps_tile_builder, fixture_metadata, tmp_path
+    ):
+        url = fixture_metadata["level2A_url"].iloc[0]
+        df = dps_tile_builder.load_granule_product(
+            _LocalFSSpec(),
+            url,
+            dps_tile_builder.SCHEMA.products[0],
+            Tile(TILE_ID),
+            str(tmp_path),
+        )
+        assert len(df) > 0
+        assert not list(tmp_path.iterdir())
 
 
 class TestSelectGranulesForYear:

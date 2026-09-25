@@ -4,9 +4,12 @@ import h5py
 import geopandas as gpd
 import logging
 import numpy as np
+import os
 import pandas as pd
+import pathlib
 import psutil
 import sys
+import tempfile
 from typing import List, Tuple
 
 import time
@@ -25,6 +28,21 @@ EASE_X_ORIGIN = -17367530.445161499083042
 EASE_Y_ORIGIN = 7314540.830638599582016
 EASE_X_SCALE = 1000.895023349556141
 EASE_Y_SCALE = 1000.895023349562052
+
+# Local disk and memory budget. Granule files are downloaded one at a time
+# into the job's working directory and deleted after reading (the largest,
+# L2A, is ~2 GB). The final sort is capped at DUCKDB_MEMORY_LIMIT and
+# spills at most DUCKDB_MAX_TEMP to the same directory; the two never
+# overlap in time. One thread keeps the sort's memory within the limit
+# and the output in exact Hilbert order; the busiest Brazil tile-year
+# (783k shots) writes in ~80 s this way.
+DUCKDB_MEMORY_LIMIT = "2GB"
+DUCKDB_MAX_TEMP = "15GB"
+DUCKDB_THREADS = 1
+# v3 rows are ~5x wider than v2 (1,377 columns), so a 50k-row group is
+# about the size in bytes of a v2 200k-row group. The parquet writer
+# buffers a whole row group: ~0.9 GB at 50k rows against ~3.2 GB at 200k.
+ROW_GROUP_SIZE = 50_000
 
 # Columns read from the tile metadata. The geometry columns are not
 # needed to build a tile, and reading them costs a conversion.
@@ -160,11 +178,14 @@ def load_granule_product(
     s3url: str,
     product: Product,
     tile: Tile,
+    work_dir: str,
     retry_count: int = 3,
 ) -> pd.DataFrame:
     """Load a GEDI HDF5 file and return a flattened dataframe.
     Args:
         s3url: S3 URL to the GEDI HDF5 file.
+        work_dir: Local directory the file is downloaded into, and
+            deleted from once read.
         columns: Dictionary of the form {df_name: sds_name},
             defining the columns to extract from the file.
             df_name is the desired output column name,
@@ -174,8 +195,12 @@ def load_granule_product(
     """
     anci = {}
     extra = [product.primary_key, product.geometry.lat, product.geometry.lon]
+    local_path = os.path.join(work_dir, s3url.rsplit("/", 1)[1])
     try:
-        with rfs.get_fs().open(s3url, mode="rb") as f, h5py.File(f) as hdf5:
+        # Download first: h5py reads straight from S3 cost ~2 s per
+        # dataset, against seconds for the whole file.
+        rfs.get_fs().get(s3url, local_path)
+        with h5py.File(local_path, "r") as hdf5:
             full_df = []
             for k in hdf5.keys():
                 if not k.startswith("BEAM"):
@@ -211,14 +236,20 @@ def load_granule_product(
             f"Timeout reading {s3url}, retrying in {wait}s ({retry_count} attempts left)..."
         )
         time.sleep(wait)
-        return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
+        return load_granule_product(
+            rfs, s3url, product, tile, work_dir, retry_count - 1
+        )
     except Exception as e:
         if retry_count <= 0:
             raise e
         # Try again with new credentials, but if that doesn't work, fail.
         logger.warning("Refreshing S3 credentials and retrying...")
         rfs.refresh()
-        return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
+        return load_granule_product(
+            rfs, s3url, product, tile, work_dir, retry_count - 1
+        )
+    finally:
+        pathlib.Path(local_path).unlink(missing_ok=True)
     if len(full_df) == 0:
         return pd.DataFrame()  # no tile data in granule
     full_df = pd.concat(full_df)
@@ -250,6 +281,7 @@ def load_granule(
     product_files: List[Tuple[Product, str]],
     tile: Tile,
     qf: bool,
+    work_dir: str,
 ) -> gpd.GeoDataFrame:
     """Load dataframes for all products and join into a single geodataframe.
     Args:
@@ -259,6 +291,7 @@ def load_granule(
             granule: the file is not read, and its schema-expanded
             columns are NaN-filled instead.
         qf: Keep only shots with l2a_quality_flag_rel3_l2a == 1.
+        work_dir: Local directory for downloaded granule files.
     """
     available: List[Tuple[Product, str]] = []
     missing: List[Product] = []
@@ -285,7 +318,7 @@ def load_granule(
         logger.debug(
             "Reading product %s from %s", product_schema.product_level, s3url
         )
-        df = load_granule_product(rfs, s3url, product_schema, tile)
+        df = load_granule_product(rfs, s3url, product_schema, tile, work_dir)
         if len(df) == 0:
             return pd.DataFrame({})
         dfs.append(df)
@@ -358,11 +391,61 @@ def log_memory(logger, message=""):
     logger.info(f"Current memory usage: {mem_usage_gb:.2f} GB {message}")
 
 
+def write_tile(con, full_df: pd.DataFrame, tile: Tile, year: int, out_prefix: str):
+    """Add the geometry and grid columns and write the tile-year as
+    Hilbert-ordered GeoParquet under out_prefix, partitioned by tile and
+    year."""
+    tile_bounds = (
+        f"ST_MakeBox2D(ST_Point({tile.minx}, {tile.miny}), "
+        f"ST_Point({tile.maxx}, {tile.maxy}))"
+    )
+    con.register("full_df", full_df)
+    # PARTITION_BY buffers this many rows per partition before flushing
+    # (default 524,288, ~2.6 GB at v3 row width).
+    con.execute(f"SET partitioned_write_flush_threshold = {ROW_GROUP_SIZE};")
+    con.execute("INSTALL h3 FROM community;")
+    con.load_extension("h3")
+    con.sql(f"""--sql
+        COPY (
+            SELECT *,
+                -- OGC:CRS84 is WGS 84 in lon/lat order, which DuckDB,
+                -- GeoParquet and GDAL all agree on (EPSG:4326 is lat/lon
+                -- in DuckDB unless geometry_always_xy is set).
+                ST_Point(lon_lowestmode, lat_lowestmode)::GEOMETRY('OGC:CRS84') AS geometry,
+                ST_Transform(geometry, 'EPSG:6933') AS geometry_6933,
+                FLOOR((ST_X(geometry_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72}))::SMALLINT AS ease_72km_x,
+                FLOOR(({EASE_Y_ORIGIN} - ST_Y(geometry_6933)) / ({EASE_Y_SCALE * 72}))::SMALLINT AS ease_72km_y,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 12) AS h3_12,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03,
+                {year} AS year
+            FROM full_df
+            ORDER BY ST_Hilbert(geometry, {tile_bounds})
+        ) TO '{out_prefix}' (
+            FORMAT parquet,
+            GEOPARQUET_VERSION 'V2',
+            PARTITION_BY ({ducky.TILE_ID}, {ducky.YEAR}),
+            COMPRESSION zstd,
+            ROW_GROUP_SIZE {ROW_GROUP_SIZE},
+            OVERWRITE_OR_IGNORE
+        );
+    """)
+
+
 def run_main(args: argparse.Namespace):
-    """Main function to create a tile."""
+    """Main function to create a tile. Local scratch files (granule
+    downloads, DuckDB spill) live in a directory under the working
+    directory, removed when the job ends."""
+    with tempfile.TemporaryDirectory(dir=".", prefix="gtiler_") as work_dir:
+        return build_tile(args, work_dir)
+
+
+def build_tile(args: argparse.Namespace, work_dir: str):
     t1 = time.time()
 
-    con = ducky.init_duckdb()
+    con = ducky.init_duckdb(temp_dir=os.path.join(work_dir, "duckdb"))
+    con.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}';")
+    con.execute(f"SET max_temp_directory_size = '{DUCKDB_MAX_TEMP}';")
+    con.execute(f"SET threads = {DUCKDB_THREADS};")
 
     # Load metadata for the tile
     logger.info("Reading metadata and checkpoints for tile ...")
@@ -408,10 +491,10 @@ def run_main(args: argparse.Namespace):
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
 
-    dfs = [processed_data]
     batch_size = args.checkpoint_interval
     for i in range(0, len(granules_to_process), batch_size):
         batch = granules_to_process[i : i + batch_size]
+        dfs = [processed_data]
         for row in batch.itertuples():
             logger.info("Loading granule %s ...", row.granule_key)
             df = load_granule(
@@ -425,19 +508,26 @@ def run_main(args: argparse.Namespace):
                 ],
                 tile=args.tile,
                 qf=quality_filter,
+                work_dir=work_dir,
             )
+            if len(df):
+                # Granules spanning New Year also carry the adjacent
+                # year's shots.
+                df = df[df["absolute_time"].dt.year == args.year]
             logger.info(f"Loaded {len(df)} shots in granule {row.granule_key}")
             dfs.append(df)
+        # Keep only the concatenated frame, so the pieces are freed and the
+        # next batch appends to it rather than re-concatenating them.
+        processed_data = pd.concat(dfs)
+        del dfs
         log_memory(logger, "after processing batch")
         checkpointer.write_checkpoint(
             granules_to_process=granules_to_process.iloc[i + batch_size :],
-            processed_data=pd.concat(dfs),
+            processed_data=processed_data,
             quality_filter=quality_filter,
         )
-    full_df = pd.concat(dfs)
-    if len(full_df):
-        # Granules spanning New Year also carry the adjacent year's shots.
-        full_df = full_df[full_df["absolute_time"].dt.year == args.year]
+    full_df = processed_data
+    del processed_data
     t3 = time.time()
     logger.info("Loading granules took %.1f seconds.", t3 - t2)
 
@@ -451,37 +541,13 @@ def run_main(args: argparse.Namespace):
 
     full_df["tile_id"] = args.tile_id
 
-    aws_prefix = ducky.data_prefix(args.bucket, args.prefix)
-    tile_bounds = (
-        f"ST_MakeBox2D(ST_Point({args.tile.minx}, {args.tile.miny}), "
-        f"ST_Point({args.tile.maxx}, {args.tile.maxy}))"
+    write_tile(
+        con,
+        full_df,
+        args.tile,
+        args.year,
+        ducky.data_prefix(args.bucket, args.prefix),
     )
-    con.execute("INSTALL h3 FROM community;")
-    con.load_extension("h3")
-    con.sql(f"""--sql
-        COPY (
-            SELECT *,
-                -- OGC:CRS84 is WGS 84 in lon/lat order, which DuckDB,
-                -- GeoParquet and GDAL all agree on (EPSG:4326 is lat/lon
-                -- in DuckDB unless geometry_always_xy is set).
-                ST_Point(lon_lowestmode, lat_lowestmode)::GEOMETRY('OGC:CRS84') AS geometry,
-                ST_Transform(geometry, 'EPSG:6933') AS geometry_6933,
-                FLOOR((ST_X(geometry_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72}))::SMALLINT AS ease_72km_x,
-                FLOOR(({EASE_Y_ORIGIN} - ST_Y(geometry_6933)) / ({EASE_Y_SCALE * 72}))::SMALLINT AS ease_72km_y,
-                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 12) AS h3_12,
-                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03,
-                {args.year} AS year
-            FROM full_df
-            ORDER BY ST_Hilbert(geometry, {tile_bounds})
-        ) TO '{aws_prefix}' (
-            FORMAT parquet,
-            GEOPARQUET_VERSION 'V2',
-            PARTITION_BY ({ducky.TILE_ID}, {ducky.YEAR}),
-            COMPRESSION zstd,
-            ROW_GROUP_SIZE 200_000,
-            OVERWRITE_OR_IGNORE
-        );
-    """)
 
     t4 = time.time()
     logger.info("Writing parquet took %.1f seconds.", t4 - t3)
