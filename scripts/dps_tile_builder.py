@@ -31,18 +31,20 @@ EASE_Y_SCALE = 1000.895023349562052
 
 # Local disk and memory budget. Granule files are downloaded one at a time
 # into the job's working directory and deleted after reading (the largest,
-# L2A, is ~2 GB). The final sort is capped at DUCKDB_MEMORY_LIMIT and
-# spills at most DUCKDB_MAX_TEMP to the same directory; the two never
-# overlap in time. One thread keeps the sort's memory within the limit
-# and the output in exact Hilbert order; the busiest Brazil tile-year
-# (783k shots) writes in ~80 s this way.
-DUCKDB_MEMORY_LIMIT = "2GB"
+# L2A, is ~2 GB). The final sort reads a staged local copy of the rows, is
+# capped at DUCKDB_MEMORY_LIMIT, and spills at most DUCKDB_MAX_TEMP to the
+# same directory. A 200k-row group at v3 width takes ~3.2 GB of that in
+# the parquet writer. One thread keeps the sort within the limit and the
+# output in exact Hilbert order. On the busiest Brazil tile-year (783k
+# shots) the write peaks at ~5 GB RSS with ~4.3 GB spilled, in ~2 min.
+# (A 5 GB limit ran out of memory there, where 4 GB did not.)
+DUCKDB_MEMORY_LIMIT = "4GB"
 DUCKDB_MAX_TEMP = "15GB"
 DUCKDB_THREADS = 1
-# v3 rows are ~5x wider than v2 (1,377 columns), so a 50k-row group is
-# about the size in bytes of a v2 200k-row group. The parquet writer
-# buffers a whole row group: ~0.9 GB at 50k rows against ~3.2 GB at 200k.
-ROW_GROUP_SIZE = 50_000
+ROW_GROUP_SIZE = 200_000
+# Row group size for the unsorted local copy the final sort reads from.
+# Small, so that staging it costs little memory on top of the frame.
+STAGE_ROW_GROUP_SIZE = 50_000
 
 # Columns read from the tile metadata. The geometry columns are not
 # needed to build a tile, and reading them costs a conversion.
@@ -391,15 +393,28 @@ def log_memory(logger, message=""):
     logger.info(f"Current memory usage: {mem_usage_gb:.2f} GB {message}")
 
 
-def write_tile(con, full_df: pd.DataFrame, tile: Tile, year: int, out_prefix: str):
-    """Add the geometry and grid columns and write the tile-year as
-    Hilbert-ordered GeoParquet under out_prefix, partitioned by tile and
-    year."""
+def stage_tile(con, full_df: pd.DataFrame, path: str):
+    """Write the tile-year's rows, unsorted, to a local parquet file, so the
+    pandas frame can be freed before the sort."""
+    con.register("full_df", full_df)
+    con.sql(f"""
+        COPY full_df TO '{path}' (
+            FORMAT parquet,
+            COMPRESSION zstd,
+            ROW_GROUP_SIZE {STAGE_ROW_GROUP_SIZE}
+        );
+    """)
+    con.unregister("full_df")
+
+
+def write_tile(con, staged: str, tile: Tile, year: int, out_prefix: str):
+    """Add the geometry and grid columns to the staged rows and write the
+    tile-year as Hilbert-ordered GeoParquet under out_prefix, partitioned
+    by tile and year."""
     tile_bounds = (
         f"ST_MakeBox2D(ST_Point({tile.minx}, {tile.miny}), "
         f"ST_Point({tile.maxx}, {tile.maxy}))"
     )
-    con.register("full_df", full_df)
     # PARTITION_BY buffers this many rows per partition before flushing
     # (default 524,288, ~2.6 GB at v3 row width).
     con.execute(f"SET partitioned_write_flush_threshold = {ROW_GROUP_SIZE};")
@@ -418,7 +433,7 @@ def write_tile(con, full_df: pd.DataFrame, tile: Tile, year: int, out_prefix: st
                 h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 12) AS h3_12,
                 h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03,
                 {year} AS year
-            FROM full_df
+            FROM read_parquet('{staged}')
             ORDER BY ST_Hilbert(geometry, {tile_bounds})
         ) TO '{out_prefix}' (
             FORMAT parquet,
@@ -541,9 +556,14 @@ def build_tile(args: argparse.Namespace, work_dir: str):
 
     full_df["tile_id"] = args.tile_id
 
+    # The sort needs most of the job's memory for 200k-row groups, so it
+    # reads from a local copy rather than the pandas frame.
+    staged = os.path.join(work_dir, "tile.parquet")
+    stage_tile(con, full_df, staged)
+    del full_df
     write_tile(
         con,
-        full_df,
+        staged,
         args.tile,
         args.year,
         ducky.data_prefix(args.bucket, args.prefix),
