@@ -201,7 +201,7 @@ def load_granule_product(
     try:
         # Download first: h5py reads straight from S3 cost ~2 s per
         # dataset, against seconds for the whole file.
-        rfs.get_fs().get(s3url, local_path)
+        rfs.get_fs().get_file(s3url, local_path)
         with h5py.File(local_path, "r") as hdf5:
             full_df = []
             for k in hdf5.keys():
