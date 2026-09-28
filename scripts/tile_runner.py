@@ -289,12 +289,11 @@ def main(args):
         for tile_id, year in batch:
             logger.info("Submitting job for tile %s year %d...", tile_id, year)
             job_name = f"tiler_{args.job_code}_{args.job_iteration}"
-            queue = get_queue(tile_id)
+            queue = args.queue or get_queue(tile_id)
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
-                version="amelia-deploy-nScOUwBm",
-                # version="amelia-deploy-yfpetMPn",
+                version=args.algo_version,
                 queue=queue,
                 bucket=args.bucket,
                 prefix=args.prefix,
@@ -348,6 +347,20 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="S3 prefix for tiled GEDI database.",
+    )
+    parser.add_argument(
+        "--algo_version",
+        type=str,
+        required=True,
+        help="Registered gedi-tile-writer version (deploy branch) to run.",
+    )
+    parser.add_argument(
+        "--queue",
+        type=str,
+        help=(
+            "DPS queue for every job, e.g. maap-dps-worker-16gb to rerun "
+            "failures. Defaults to a per-latitude choice."
+        ),
     )
     parser.add_argument(
         "--start_year",
