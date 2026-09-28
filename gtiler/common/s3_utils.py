@@ -47,7 +47,16 @@ class RefreshableFSSpec:
         # From the response that contains the assumed role, get the temporary
         # credentials that can be used to make subsequent API calls
         credentials = assumed_role_object["Credentials"]
-        logger.info("Role assumed, temporary credentials obtained.")
+        identity = boto3.client(
+            "sts",
+            aws_access_key_id=credentials["AccessKeyId"],
+            aws_secret_access_key=credentials["SecretAccessKey"],
+            aws_session_token=credentials["SessionToken"],
+        ).get_caller_identity()
+        logger.info(
+            "Role assumed, temporary credentials obtained for %s.",
+            identity["Arn"],
+        )
 
         return credentials
 
