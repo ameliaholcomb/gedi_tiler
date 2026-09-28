@@ -4,9 +4,12 @@ import h5py
 import geopandas as gpd
 import logging
 import numpy as np
+import os
 import pandas as pd
+import pathlib
 import psutil
 import sys
+import tempfile
 from typing import List, Tuple
 
 import time
@@ -15,14 +18,46 @@ from gtiler.database import ducky
 from gtiler.database.tiles import Tile
 from gtiler.common import s3_utils
 from gtiler.common import checkpoint_lib
-from gtiler.database.schema import SCHEMA
-from gtiler.database.schema import Product, GeometryColumn  # typing only
+from gtiler.database.schema_v3 import SCHEMA
+from gtiler.database.schema_v3 import Product, GeometryColumn  # typing only
 
 logger = logging.getLogger(__name__)
 
 
-QDEGRADE = [0, 3, 8, 10, 13, 18, 20, 23, 28, 30, 33, 38, 40, 43, 48, 60, 63, 68]
+EASE_X_ORIGIN = -17367530.445161499083042
+EASE_Y_ORIGIN = 7314540.830638599582016
+EASE_X_SCALE = 1000.895023349556141
+EASE_Y_SCALE = 1000.895023349562052
 
+# Local disk and memory budget. Granule files are downloaded one at a time
+# into the job's working directory and deleted after reading (the largest,
+# L2A, is ~2 GB). The final sort reads a staged local copy of the rows, is
+# capped at DUCKDB_MEMORY_LIMIT, and spills at most DUCKDB_MAX_TEMP to the
+# same directory. A 200k-row group at v3 width takes ~3.2 GB of that in
+# the parquet writer. One thread keeps the sort within the limit and the
+# output in exact Hilbert order. On the busiest Brazil tile-year (783k
+# shots) the write peaks at ~5 GB RSS with ~4.3 GB spilled, in ~2 min.
+# (A 5 GB limit ran out of memory there, where 4 GB did not.)
+DUCKDB_MEMORY_LIMIT = "4GB"
+DUCKDB_MAX_TEMP = "15GB"
+DUCKDB_THREADS = 1
+ROW_GROUP_SIZE = 200_000
+# Row group size for the unsorted local copy the final sort reads from.
+# Small, so that staging it costs little memory on top of the frame.
+STAGE_ROW_GROUP_SIZE = 50_000
+
+# Columns read from the tile metadata. The geometry columns are not
+# needed to build a tile, and reading them costs a conversion.
+GRANULE_COLUMNS = [
+    "granule_key",
+    "level2A_url",
+    "level2B_url",
+    "level4A_url",
+    "level4C_url",
+    "time_start",
+    "time_end",
+    "quality_filter",
+]
 
 def get_cmd_args():
     p = argparse.ArgumentParser(
@@ -60,6 +95,17 @@ def get_cmd_args():
         ),
     )
     p.add_argument(
+        "-y",
+        "--year",
+        dest="year",
+        type=int,
+        required=True,
+        help=(
+            "Year to process. Only footprints acquired in this year are "
+            "written, even when a granule spans New Year."
+        ),
+    )
+    p.add_argument(
         "-g",
         "--generation",
         dest="generation",
@@ -88,13 +134,6 @@ def get_cmd_args():
         dest="test",
         action="store_true",
         help="Quick test running over only 2 GEDI granules.",
-    )
-    p.add_argument(
-        "-q",
-        "--quality",
-        dest="quality",
-        action="store_true",
-        help="Apply quality filters to the data.",
     )
     p.add_argument(
         "-v",
@@ -141,11 +180,14 @@ def load_granule_product(
     s3url: str,
     product: Product,
     tile: Tile,
+    work_dir: str,
     retry_count: int = 3,
 ) -> pd.DataFrame:
     """Load a GEDI HDF5 file and return a flattened dataframe.
     Args:
         s3url: S3 URL to the GEDI HDF5 file.
+        work_dir: Local directory the file is downloaded into, and
+            deleted from once read.
         columns: Dictionary of the form {df_name: sds_name},
             defining the columns to extract from the file.
             df_name is the desired output column name,
@@ -155,8 +197,12 @@ def load_granule_product(
     """
     anci = {}
     extra = [product.primary_key, product.geometry.lat, product.geometry.lon]
+    local_path = os.path.join(work_dir, s3url.rsplit("/", 1)[1])
     try:
-        with rfs.get_fs().open(s3url, mode="rb") as f, h5py.File(f) as hdf5:
+        # Download first: h5py reads straight from S3 cost ~2 s per
+        # dataset, against seconds for the whole file.
+        rfs.get_fs().get(s3url, local_path)
+        with h5py.File(local_path, "r") as hdf5:
             full_df = []
             for k in hdf5.keys():
                 if not k.startswith("BEAM"):
@@ -192,14 +238,20 @@ def load_granule_product(
             f"Timeout reading {s3url}, retrying in {wait}s ({retry_count} attempts left)..."
         )
         time.sleep(wait)
-        return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
+        return load_granule_product(
+            rfs, s3url, product, tile, work_dir, retry_count - 1
+        )
     except Exception as e:
         if retry_count <= 0:
             raise e
         # Try again with new credentials, but if that doesn't work, fail.
         logger.warning("Refreshing S3 credentials and retrying...")
         rfs.refresh()
-        return load_granule_product(rfs, s3url, product, tile, retry_count - 1)
+        return load_granule_product(
+            rfs, s3url, product, tile, work_dir, retry_count - 1
+        )
+    finally:
+        pathlib.Path(local_path).unlink(missing_ok=True)
     if len(full_df) == 0:
         return pd.DataFrame()  # no tile data in granule
     full_df = pd.concat(full_df)
@@ -230,7 +282,8 @@ def load_granule(
     granule: str,
     product_files: List[Tuple[Product, str]],
     tile: Tile,
-    qf: bool = True,
+    qf: bool,
+    work_dir: str,
 ) -> gpd.GeoDataFrame:
     """Load dataframes for all products and join into a single geodataframe.
     Args:
@@ -239,10 +292,8 @@ def load_granule(
             null s3url (None/NaN) marks the product as missing for this
             granule: the file is not read, and its schema-expanded
             columns are NaN-filled instead.
-        qf: Apply L2A quality filters. Callers should pass False when
-            any product is missing for this granule, since the filter
-            columns may not all be present (run_main disables qf
-            tile-wide when any granule has missing URLs).
+        qf: Keep only shots with l2a_quality_flag_rel3_l2a == 1.
+        work_dir: Local directory for downloaded granule files.
     """
     available: List[Tuple[Product, str]] = []
     missing: List[Product] = []
@@ -269,7 +320,7 @@ def load_granule(
         logger.debug(
             "Reading product %s from %s", product_schema.product_level, s3url
         )
-        df = load_granule_product(rfs, s3url, product_schema, tile)
+        df = load_granule_product(rfs, s3url, product_schema, tile, work_dir)
         if len(df) == 0:
             return pd.DataFrame({})
         dfs.append(df)
@@ -290,37 +341,50 @@ def load_granule(
 
     # Add derived data columns
     full_df["granule"] = granule
+    # Source file name per product, null where the product is missing.
+    # The string dtype keeps an all-null column VARCHAR in the output.
+    for product_schema, s3url in product_files:
+        col = f"root_file_{product_schema.product_level.name.lower()}"
+        name = None if s3url is None or pd.isna(s3url) else s3url.rsplit("/", 1)[1]
+        full_df[col] = pd.Series(name, index=full_df.index, dtype="string")
     gedi_count_start = pd.to_datetime("2018-01-01T00:00:00Z")
     full_df["absolute_time"] = gedi_count_start + pd.to_timedelta(
-        full_df["delta_time"], "seconds"
+        full_df["delta_time_l2a"], "seconds"
     )
     if qf:
-        full_df = full_df[
-            (full_df["quality_flag"] == 1)
-            & (full_df["sensitivity"] >= 0.9)
-            & (full_df["sensitivity"] <= 1.0)
-            & (full_df["sensitivity_a2"] > 0.95)
-            & (full_df["sensitivity_a2"] <= 1.0)
-            & (full_df["degrade_flag"].isin(QDEGRADE))
-            & (full_df["surface_flag"] == 1)
-        ]
+        full_df = full_df[full_df["l2a_quality_flag_rel3_l2a"] == 1]
     # make shot_number a column now that the join is finished
     full_df.reset_index(inplace=True)
     return full_df
 
 
-def load_tile_metadata(tile_id: str, bucket: str, prefix: str):
+def load_tile_metadata(con, tile_id: str, bucket: str, prefix: str):
     """Load metadata for a specific tile from S3.
     Args:
         tile_id: Tile ID to load (e.g. N00W000)
         bucket: S3 bucket where the metadata is stored.
         prefix: S3 prefix (folder) where the metadata is stored.
     Returns:
-        GeoDataFrame with the metadata for the specified tile.
+        DataFrame with one row per granule covering the tile.
     """
     md_spec = ducky.metadata_spec(bucket, prefix, tile_id)
-    md_spec = md_spec.replace("*", "data_0")
-    return gpd.read_file(md_spec)
+    columns = ", ".join(GRANULE_COLUMNS)
+    return con.execute(
+        f"SELECT {columns} FROM read_parquet('{md_spec}')"
+    ).df()
+
+
+def select_granules_for_year(granules: pd.DataFrame, year: int) -> pd.DataFrame:
+    """Granules whose acquisition window overlaps the given year.
+
+    A granule spanning New Year is selected by both adjacent years; each
+    job writes only the footprints belonging to its own year.
+    """
+    start = pd.Timestamp(year=year, month=1, day=1, tz="UTC")
+    end = pd.Timestamp(year=year + 1, month=1, day=1, tz="UTC")
+    return granules[
+        (granules["time_start"] < end) & (granules["time_end"] >= start)
+    ]
 
 
 def log_memory(logger, message=""):
@@ -329,24 +393,101 @@ def log_memory(logger, message=""):
     logger.info(f"Current memory usage: {mem_usage_gb:.2f} GB {message}")
 
 
+def stage_tile(con, full_df: pd.DataFrame, path: str):
+    """Write the tile-year's rows, unsorted, to a local parquet file, so the
+    pandas frame can be freed before the sort."""
+    con.register("full_df", full_df)
+    con.sql(f"""
+        COPY full_df TO '{path}' (
+            FORMAT parquet,
+            COMPRESSION zstd,
+            ROW_GROUP_SIZE {STAGE_ROW_GROUP_SIZE}
+        );
+    """)
+    con.unregister("full_df")
+
+
+def write_tile(con, staged: str, tile: Tile, year: int, out_prefix: str):
+    """Add the geometry and grid columns to the staged rows and write the
+    tile-year as Hilbert-ordered GeoParquet under out_prefix, partitioned
+    by tile and year."""
+    tile_bounds = (
+        f"ST_MakeBox2D(ST_Point({tile.minx}, {tile.miny}), "
+        f"ST_Point({tile.maxx}, {tile.maxy}))"
+    )
+    # PARTITION_BY buffers this many rows per partition before flushing
+    # (default 524,288, ~2.6 GB at v3 row width).
+    con.execute(f"SET partitioned_write_flush_threshold = {ROW_GROUP_SIZE};")
+    con.execute("INSTALL h3 FROM community;")
+    con.load_extension("h3")
+    con.sql(f"""--sql
+        COPY (
+            SELECT *,
+                -- OGC:CRS84 is WGS 84 in lon/lat order, which DuckDB,
+                -- GeoParquet and GDAL all agree on (EPSG:4326 is lat/lon
+                -- in DuckDB unless geometry_always_xy is set).
+                ST_Point(lon_lowestmode, lat_lowestmode)::GEOMETRY('OGC:CRS84') AS geometry,
+                ST_Transform(geometry, 'EPSG:6933') AS geometry_6933,
+                FLOOR((ST_X(geometry_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72}))::SMALLINT AS ease_72km_x,
+                FLOOR(({EASE_Y_ORIGIN} - ST_Y(geometry_6933)) / ({EASE_Y_SCALE * 72}))::SMALLINT AS ease_72km_y,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 12) AS h3_12,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03,
+                {year} AS year
+            FROM read_parquet('{staged}')
+            ORDER BY ST_Hilbert(geometry, {tile_bounds})
+        ) TO '{out_prefix}' (
+            FORMAT parquet,
+            GEOPARQUET_VERSION 'V2',
+            PARTITION_BY ({ducky.TILE_ID}, {ducky.YEAR}),
+            COMPRESSION zstd,
+            ROW_GROUP_SIZE {ROW_GROUP_SIZE},
+            OVERWRITE_OR_IGNORE
+        );
+    """)
+
+
 def run_main(args: argparse.Namespace):
-    """Main function to create a tile."""
+    """Main function to create a tile. Local scratch files (granule
+    downloads, DuckDB spill) live in a directory under the working
+    directory, removed when the job ends."""
+    with tempfile.TemporaryDirectory(dir=".", prefix="gtiler_") as work_dir:
+        return build_tile(args, work_dir)
+
+
+def build_tile(args: argparse.Namespace, work_dir: str):
     t1 = time.time()
+
+    con = ducky.init_duckdb(temp_dir=os.path.join(work_dir, "duckdb"))
+    con.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}';")
+    con.execute(f"SET max_temp_directory_size = '{DUCKDB_MAX_TEMP}';")
+    con.execute(f"SET threads = {DUCKDB_THREADS};")
 
     # Load metadata for the tile
     logger.info("Reading metadata and checkpoints for tile ...")
     checkpointer = checkpoint_lib.Checkpointer(
-        args.bucket, args.prefix, args.tile_id, generation=args.generation
+        args.bucket,
+        args.prefix,
+        args.tile_id,
+        args.year,
+        generation=args.generation,
     )
     initial_checkpoint = checkpointer.initialize()
     if initial_checkpoint is None:
         logger.info("Loading new work plan from metadata ...")
-        granules_to_process = load_tile_metadata(
-            args.tile_id, args.bucket, args.prefix
+        tile_metadata = load_tile_metadata(
+            con, args.tile_id, args.bucket, args.prefix
         )
+        granules_to_process = select_granules_for_year(tile_metadata, args.year)
+        quality_filter = bool(tile_metadata["quality_filter"].iloc[0])
         processed_data = pd.DataFrame()
+        logger.info(
+            "%d of the tile's %d granules overlap %d.",
+            len(granules_to_process),
+            len(tile_metadata),
+            args.year,
+        )
     else:
-        granules_to_process, processed_data = initial_checkpoint
+        granules_to_process, processed_data, quality_filter = initial_checkpoint
     if args.test:
         tot = len(granules_to_process)
         granules_to_process = granules_to_process.head(2)
@@ -360,31 +501,15 @@ def run_main(args: argparse.Namespace):
         "Planning to process %d new granules.", len(granules_to_process)
     )
     logger.info("Loading metadata and checkpoints took %.1f seconds.", t2 - t1)
-
-    # Quality filtering reads columns from across the joined products, so
-    # if any granule in this tile is missing a product URL we disable QF
-    # tile-wide rather than try to filter rows that have NaN-filled cols.
-    url_cols = ["level2A_url", "level2B_url", "level4A_url", "level4C_url"]
-    has_missing_urls = (
-        granules_to_process[url_cols].isna().any().any()
-        if len(granules_to_process)
-        else False
-    )
-    qf = args.quality and not has_missing_urls
-    if args.quality and has_missing_urls:
-        logger.warning(
-            "Tile %s has granules with missing product URLs; "
-            "disabling quality filtering for the whole tile.",
-            args.tile_id,
-        )
+    logger.info("Quality filtering is %s.", "on" if quality_filter else "off")
 
     # Set up access to the ORNL and LP DAACs
     rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
 
-    dfs = [processed_data]
     batch_size = args.checkpoint_interval
     for i in range(0, len(granules_to_process), batch_size):
         batch = granules_to_process[i : i + batch_size]
+        dfs = [processed_data]
         for row in batch.itertuples():
             logger.info("Loading granule %s ...", row.granule_key)
             df = load_granule(
@@ -397,37 +522,52 @@ def run_main(args: argparse.Namespace):
                     (SCHEMA.products[3], row.level4C_url),
                 ],
                 tile=args.tile,
-                qf=qf,
+                qf=quality_filter,
+                work_dir=work_dir,
             )
+            if len(df):
+                # Granules spanning New Year also carry the adjacent
+                # year's shots.
+                df = df[df["absolute_time"].dt.year == args.year]
             logger.info(f"Loaded {len(df)} shots in granule {row.granule_key}")
             dfs.append(df)
+        # Keep only the concatenated frame, so the pieces are freed and the
+        # next batch appends to it rather than re-concatenating them.
+        processed_data = pd.concat(dfs)
+        del dfs
         log_memory(logger, "after processing batch")
         checkpointer.write_checkpoint(
             granules_to_process=granules_to_process.iloc[i + batch_size :],
-            processed_data=pd.concat(dfs),
+            processed_data=processed_data,
+            quality_filter=quality_filter,
         )
-    full_df = pd.concat(dfs)
-    full_df["tile_id"] = args.tile_id
+    full_df = processed_data
+    del processed_data
     t3 = time.time()
     logger.info("Loading granules took %.1f seconds.", t3 - t2)
 
-    con = ducky.init_duckdb()
-    aws_prefix = ducky.data_prefix(args.bucket, args.prefix)
-    df = con.sql("""
-        SELECT *,
-            ST_Point(lon_lowestmode, lat_lowestmode) AS geometry,
-            date_part('year', absolute_time) AS year
-        FROM full_df
-    """)
-    con.sql(f"""
-        COPY df TO '{aws_prefix}' (
-            FORMAT parquet,
-            PARTITION_BY ({ducky.TILE_ID}, {ducky.YEAR}),
-            COMPRESSION zstd,
-            ROW_GROUP_SIZE 10_000,
-            OVERWRITE_OR_IGNORE
-        );
-    """)
+    if len(full_df) == 0:
+        marker = ducky.empty_marker_path(
+            args.bucket, args.prefix, args.tile_id, args.year
+        )
+        logger.info("No footprints to write. Marking empty: %s", marker)
+        s3_utils.write_empty_file(marker)
+        return 0
+
+    full_df["tile_id"] = args.tile_id
+
+    # The sort needs most of the job's memory for 200k-row groups, so it
+    # reads from a local copy rather than the pandas frame.
+    staged = os.path.join(work_dir, "tile.parquet")
+    stage_tile(con, full_df, staged)
+    del full_df
+    write_tile(
+        con,
+        staged,
+        args.tile,
+        args.year,
+        ducky.data_prefix(args.bucket, args.prefix),
+    )
 
     t4 = time.time()
     logger.info("Writing parquet took %.1f seconds.", t4 - t3)

@@ -1,5 +1,6 @@
 import argparse
 import boto3
+import fsspec
 import geopandas as gpd
 import logging
 import pandas as pd
@@ -10,7 +11,7 @@ from maap.maap import MAAP
 from gtiler.common import shape_parser, s3_utils
 from gtiler.common.granule_metadata import get_granule_metadata
 from gtiler.database import ducky, tiles
-from gtiler.database.schema import GediProduct
+from gtiler.database.schema_v2 import GediProduct
 
 logger = logging.getLogger(__name__)
 
@@ -64,24 +65,71 @@ def get_queue(tile_id):
     else:
         return "maap-dps-worker-8gb"
 
-def get_tile_ids_novalidation(bucket, prefix):
-    prefix = f"{prefix}/data/"
+def _tile_year(path):
+    """Pull the (tile_id, year) pair out of a partitioned data path."""
+    parts = dict(p.split("=", 1) for p in path.split("/") if "=" in p)
+    return parts[ducky.TILE_ID], int(parts[ducky.YEAR])
+
+
+def get_tile_years_novalidation(bucket, prefix):
+    """(tile_id, year) pairs present in the database, from an S3 listing.
+    Includes tile-years holding only an empty marker."""
     s3 = boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
-    tile_ids = []
+    tile_years = set()
+    for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/data/"):
+        for obj in page.get("Contents", []):
+            tile_years.add(_tile_year(obj["Key"]))
+    return tile_years
 
-    for page in paginator.paginate(
-        Bucket=bucket,
-        Prefix=prefix,
-        Delimiter="/",          # stop at the next path segment
+
+def get_empty_tile_years(bucket, prefix):
+    """(tile_id, year) pairs whose jobs completed with no footprints."""
+    fs = fsspec.filesystem("s3")
+    return {
+        _tile_year(p) for p in fs.glob(ducky.empty_marker_spec(bucket, prefix))
+    }
+
+
+def required_tile_years(granules, start_year, end_year):
+    """(tile_id, year) pairs the granules cover, restricted to the years
+    this run was asked to build. Clamping matters: a granule spanning New
+    Year would otherwise create a sliver partition for a year that a later
+    run would then skip as already present."""
+    tile_years = set()
+    for tile, start, end in zip(
+        granules.tile_id, granules.time_start, granules.time_end
     ):
-        for cp in page.get("CommonPrefixes", []):
-            # cp["Prefix"] looks like: "path/to/data/tile_id=N06_W123/"
-            segment = cp["Prefix"].rstrip("/").split("/")[-1]  # "tile_id=N06_W123"
-            if segment.startswith("tile_id="):
-                tile_ids.append(segment.split("=", 1)[1])     # "N06_W123"
-    return tile_ids
-    
+        for year in range(start.year, end.year + 1):
+            if start_year is not None and year < start_year:
+                continue
+            if end_year is not None and year > end_year:
+                continue
+            tile_years.add((tile, year))
+    return tile_years
+
+
+def check_quality_consistency(con, md_spec: str, quality: bool):
+    """Exit if existing metadata was built with a different quality
+    filtering setting than this run, which would leave the database
+    inconsistently filtered."""
+    mismatched = con.execute(f"""
+        SELECT DISTINCT tile_id FROM read_parquet('{md_spec}')
+        WHERE quality_filter IS DISTINCT FROM {quality}
+    """).fetchall()
+    if mismatched:
+        tile_ids = sorted(x[0] for x in mismatched)
+        logger.warning(
+            "%d existing metadata tiles were built with a different quality "
+            "filtering setting than --quality=%s: %s%s",
+            len(tile_ids),
+            quality,
+            ", ".join(tile_ids[:10]),
+            " ..." if len(tile_ids) > 10 else "",
+        )
+        exit(1)
+
+
 def main(args):
     # Metadata is written first, then data is backfilled by the DPS jobs.
     # DPS jobs can fail, be re-run, etc, but the metadata is only written once.
@@ -133,7 +181,11 @@ def main(args):
     )
     tile_granule_gdf.drop(columns=["index_right"], inplace=True)
     tile_granule_gdf["cmr_access_time"] = pd.Timestamp.now(tz="UTC")
+    tile_granule_gdf["quality_filter"] = args.quality
     required_tiles = set(tile_granule_gdf.tile_id.unique())
+    required = required_tile_years(
+        tile_granule_gdf, args.start_year, args.end_year
+    )
 
     # 2. Get existing metadata tiles in S3
     con = ducky.init_duckdb()
@@ -145,6 +197,8 @@ def main(args):
             f"SELECT DISTINCT tile_id FROM read_parquet('{md_spec}')"
         ).fetchall()
         existing_md = {x[0] for x in existing_md}
+        if not args.fast_scan:
+            check_quality_consistency(con, md_spec, args.quality)
 
         tile_granule_gdf = tile_granule_gdf[
             ~tile_granule_gdf.tile_id.isin(existing_md)
@@ -152,26 +206,27 @@ def main(args):
     else:
         existing_md = set()
 
-    # 3. Get existing tiles in the database
+    # 3. Get existing tile-years in the database
     # check if the database path exists:
-    logger.info("Checking for existing tiles in the database...")
+    logger.info("Checking for existing tile-years in the database...")
     path = ducky.data_prefix(args.bucket, args.prefix)
     if s3_utils.s3_prefix_exists(path):
         if args.fast_scan:
-            existing_tiles = set(get_tile_ids_novalidation(args.bucket, args.prefix))
-            logger.info("Found %d existing tiles (fast scan).", len(existing_tiles))
+            existing = get_tile_years_novalidation(args.bucket, args.prefix)
+            logger.info("Found %d existing tile-years (fast scan).", len(existing))
         else:
             data_spec = ducky.data_spec(args.bucket, args.prefix)
-            existing_tiles = con.execute(
-                f"SELECT DISTINCT tile_id FROM read_parquet('{data_spec}')"
+            existing = con.execute(
+                f"SELECT DISTINCT tile_id, year FROM read_parquet('{data_spec}')"
             ).fetchall()
-            existing_tiles = {x[0] for x in existing_tiles}
-            # TODO: Do we need a way for jobs to mark that they completed but had no data?
+            existing = {(t, int(y)) for t, y in existing}
+            # Empty tile-years hold no rows for the scan above to find.
+            existing |= get_empty_tile_years(args.bucket, args.prefix)
     else:
-        existing_tiles = set()
+        existing = set()
 
     # tiles with data but no metadata:
-    wrong = [x for x in existing_tiles if x not in existing_md]
+    wrong = sorted({t for t, _ in existing if t not in existing_md})
     if len(wrong) > 0:
         logger.warning(
             "Warning: %d tiles have data but no metadata."
@@ -181,15 +236,15 @@ def main(args):
         )
         exit(1)
 
-    missing_tiles = [x for x in required_tiles if x not in existing_tiles]
+    missing = sorted(required - existing)
     relevant_md_tiles = {x for x in existing_md if x in required_tiles}
-    relevant_data_tiles = {x for x in existing_tiles if x in required_tiles}
-    logger.info("%d tiles in the region.", len(required_tiles))
+    relevant_data = {x for x in existing if x in required}
+    logger.info("%d tiles (%d tile-years) in the region.", len(required_tiles), len(required))
     logger.info("%d metadata tiles in the database for this region.", len(relevant_md_tiles))
-    logger.info("%d tiles already exist in the database for this region.", len(relevant_data_tiles))
+    logger.info("%d tile-years already exist in the database for this region.", len(relevant_data))
     logger.info("Planning to add metadata for %d new tiles.", len(required_tiles) - len(relevant_md_tiles))
     logger.info("(Which should match this number: %d)", tile_granule_gdf.tile_id.nunique())
-    logger.info("Planning to create jobs to process data for %d tiles.", len(missing_tiles))
+    logger.info("Planning to create jobs to process data for %d tile-years.", len(missing))
 
     if args.dry_run:
         return
@@ -218,35 +273,34 @@ def main(args):
 
         logfile = f"logs/tile_plan_{args.job_code}_{args.job_iteration}.txt"
         with open(logfile, "w") as f:
-            for tile_id in sorted(missing_tiles):
-                f.write(f"{tile_id}\n")
+            for tile_id, year in missing:
+                f.write(f"{tile_id} {year}\n")
         logger.info("Proposed metadata for tiles listed in %s written to database.", logfile)
     if not args.no_confirm:
         input("To proceed to create jobs, press ENTER >>>")
 
-    # 4. Submit jobs for tiles in required_tiles but not in existing_tiles
+    # 4. Submit jobs for required tile-years not already in the database
     maap = MAAP()
     # too many tasks result in quota limits on DAAC S3 reads
     max_tasks = 900
     # issue in batches of 50 every 5 minutes.
-    for i in range(0, len(missing_tiles), 50):
-        batch = missing_tiles[i : i + 50]
-        for tile_id in batch:
-            logger.info("Submitting job for tile %s...", tile_id)
+    for i in range(0, len(missing), 50):
+        batch = missing[i : i + 50]
+        for tile_id, year in batch:
+            logger.info("Submitting job for tile %s year %d...", tile_id, year)
             job_name = f"tiler_{args.job_code}_{args.job_iteration}"
-            queue = get_queue(tile_id)
+            queue = args.queue or get_queue(tile_id)
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
-                version="amelia-deploy-nScOUwBm",
-                # version="amelia-deploy-yfpetMPn",
+                version=args.algo_version,
                 queue=queue,
                 bucket=args.bucket,
                 prefix=args.prefix,
                 tile_id=tile_id,
+                year=year,
                 generation=args.job_iteration,
                 checkpoint_interval=25,
-                quality="quality",
             )
         if i >= max_tasks:
             return
@@ -295,6 +349,20 @@ if __name__ == "__main__":
         help="S3 prefix for tiled GEDI database.",
     )
     parser.add_argument(
+        "--algo_version",
+        type=str,
+        required=True,
+        help="Registered gedi-tile-writer version (deploy branch) to run.",
+    )
+    parser.add_argument(
+        "--queue",
+        type=str,
+        help=(
+            "DPS queue for every job, e.g. maap-dps-worker-16gb to rerun "
+            "failures. Defaults to a per-latitude choice."
+        ),
+    )
+    parser.add_argument(
         "--start_year",
         type=int,
         help="Start year for data to include (inclusive).",
@@ -319,7 +387,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fast_scan",
         action="store_true",
-        help="Quickly scan existing tiles in database without checking for valid parquet files.",
+        help=(
+            "Quickly scan existing tiles in database without checking for valid "
+            "parquet files, and skip the quality filtering consistency check."
+        ),
+    )
+    parser.add_argument(
+        "--quality",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply GEDI quality filters to shots as tiles are built. Recorded "
+            "per tile in the metadata and read from there by dps_tile_builder."
+        ),
     )
     parser.add_argument(
         "--required_products",

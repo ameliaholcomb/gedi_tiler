@@ -7,7 +7,7 @@ import pandas as pd
 from typing import List, Optional
 
 from gtiler.common import cmr_query, granule_name
-from gtiler.database.schema import GediProduct
+from gtiler.database.schema_v2 import GediProduct
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,10 @@ def get_granule_metadata(
             GediProduct.L2B.value + "_url": "first",
             GediProduct.L4A.value + "_url": "first",
             GediProduct.L4C.value + "_url": "first",
+            # The products report slightly different acquisition windows
+            # for the same granule; keep the widest.
+            "time_start": "min",
+            "time_end": "max",
             "geometry": "first",
         }
     )

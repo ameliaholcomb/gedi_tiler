@@ -19,7 +19,7 @@ import pytest
 from unittest.mock import patch
 
 from gtiler.common import cmr_query, granule_metadata
-from gtiler.database.schema import GediProduct
+from gtiler.database.schema_v2 import GediProduct
 
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "cmr_query"
@@ -39,6 +39,8 @@ EXPECTED_OUTPUT_COLUMNS = {
     "level2B_url",
     "level4A_url",
     "level4C_url",
+    "time_start",
+    "time_end",
     "geometry",
     "granule_hash",
 }

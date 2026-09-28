@@ -9,6 +9,9 @@ from gtiler.database import tiles
 
 TILE_ID = "tile_id"
 YEAR = "year"
+# Written by jobs that complete without producing any footprints, so that
+# they are not planned again. Not a parquet file, so data globs skip it.
+EMPTY_MARKER = "_EMPTY"
 ESA_TESTDB_PATH = "s3://nasa-maap-data-store/file-staging/nasa-map/gedi-tiled-v2"
 ESA_TESTDB_MANIFEST_PATH = f"{ESA_TESTDB_PATH}/manifest.txt"
 ESA_TESTDB_ICEBERG_PATH = f"{ESA_TESTDB_PATH}/iceberg/gedi_tiled_v2/metadata/latest.metadata.json"
@@ -38,6 +41,9 @@ def init_duckdb(temp_dir: str = None):
     con.execute("SET enable_progress_bar = true;")
     con.execute("SET preserve_insertion_order = false;")
     con.execute("SET memory_limit = '8GB';")
+    # date_part on a timestamptz follows the session zone, and the year
+    # it returns decides which partition a footprint lands in.
+    con.execute("SET TimeZone = 'UTC';")
     if temp_dir:
         con.sql(f"SET temp_directory='{temp_dir}'")
     con.sql("SET max_temp_directory_size = '100GB'")
@@ -107,6 +113,18 @@ def data_prefix(bucket, prefix):
 
 def metadata_prefix(bucket, prefix):
     return f"s3://{bucket}/{prefix}/metadata/"
+
+
+def empty_marker_path(bucket, prefix, tile, year):
+    return (
+        f"{data_prefix(bucket, prefix)}{TILE_ID}={tile}/{YEAR}={year}/"
+        f"{EMPTY_MARKER}"
+    )
+
+
+def empty_marker_spec(bucket, prefix):
+    """Glob matching every empty marker in the database."""
+    return f"{data_prefix(bucket, prefix)}{TILE_ID}=*/{YEAR}=*/{EMPTY_MARKER}"
 
 
 def data_spec(bucket, prefix, tile=None, year=None):

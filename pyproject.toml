@@ -1,6 +1,6 @@
 [project]
 name = "gedi-tiler"
-version = "0.1.0"
+version = "1.0.0"
 description = "Library to create and query a tiled GEDI database on the MAAP"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,7 +9,7 @@ authors = [
     { name = "Amelia Holcomb", email = "amelia.holcomb@gmail.com" }
 ]
 dependencies = [
-    "duckdb>=1.4.1",
+    "duckdb>=1.5.5",
     "h5py",
     "geopandas>=1.1.2",
     "pandas>=2.3.3",
