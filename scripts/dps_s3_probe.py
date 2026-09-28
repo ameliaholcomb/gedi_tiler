@@ -10,8 +10,12 @@ import sys
 import traceback
 
 import boto3
+import fsspec
+import h5py
 import s3fs
 from maap.maap import MAAP
+
+from gtiler.common import s3_utils
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +139,61 @@ def s3fs_read(c, url, requester_pays):
         return f"read {len(f.read(1024))} bytes"
 
 
+def _h5_summary(f):
+    with h5py.File(f) as hdf5:
+        beam = sorted(k for k in hdf5.keys() if k.startswith("BEAM"))[0]
+        shots = hdf5[f"{beam}/shot_number"][:10]
+        return f"streamed {len(shots)} shot numbers from {beam}"
+
+
+def h5py_stream(c, url, requester_pays):
+    # The pre-download builder read: h5py over an fsspec file, with the
+    # filesystem built exactly as in s3_utils.RefreshableFSSpec.
+    fs = fsspec.filesystem(
+        "s3",
+        key=c["key"],
+        secret=c["secret"],
+        token=c["token"],
+        requester_pays=requester_pays,
+        config_kwargs={
+            "read_timeout": 120,
+            "connect_timeout": 10,
+            "retries": {"max_attempts": 3, "mode": "adaptive"},
+        },
+        default_cache_type="mmap",
+        default_block_size=5 * 1024 * 1024,
+        default_fill_cache=True,
+        skip_instance_cache=True,
+    )
+    with fs.open(url, mode="rb") as f:
+        return _h5_summary(f)
+
+
 METHODS = {
     "boto_head": boto_head,
     "boto_range_get": boto_range_get,
     "s3fs_read": s3fs_read,
+    "h5py_stream": h5py_stream,
 }
+
+
+def old_builder_reads():
+    """The exact v2 builder path: RefreshableFSSpec, then h5py over open()."""
+    print()
+    try:
+        rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
+    except Exception as e:
+        print(f"OLD_BUILDER RefreshableFSSpec: FAIL {_error_code(e)}")
+        return
+    for uname, url in URLS.items():
+        if not url.endswith(".h5"):
+            continue
+        try:
+            with rfs.get_fs().open(url, mode="rb") as f:
+                result = "OK " + _h5_summary(f)
+        except Exception as e:
+            result = "FAIL " + _error_code(e)
+        print(f"OLD_BUILDER {uname:<15} {result}")
 
 
 def _error_code(e):
@@ -159,6 +213,8 @@ def main():
         for uname, url in URLS.items():
             for rp in (True, False):
                 for mname, method in METHODS.items():
+                    if mname == "h5py_stream" and not url.endswith(".h5"):
+                        continue
                     total += 1
                     try:
                         result = "OK " + method(c, url, rp)
@@ -169,6 +225,7 @@ def main():
                     print(f"{cname:<18} {uname:<15} {str(rp):<5} {mname:<15} {result}")
     print()
     print(f"{ok} of {total} reads succeeded.")
+    old_builder_reads()
 
 
 if __name__ == "__main__":
