@@ -1,5 +1,4 @@
 import boto3
-import datetime
 import fsspec
 import logging
 from maap.maap import MAAP
@@ -8,32 +7,27 @@ logger = logging.getLogger(__name__)
 
 
 # Each DAAC issues its own temporary S3 credentials, good only for its own
-# buckets.
+# buckets. They last an hour.
 DAAC_CREDENTIALS_ENDPOINTS = {
     "lp-prod-protected": "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials",
     "ornl-cumulus-prod-protected": "https://data.ornldaac.earthdata.nasa.gov/s3credentials",
 }
-# The credentials last an hour; replace them this long before they expire so
-# that no read starts on credentials about to lapse.
-REFRESH_MARGIN = datetime.timedelta(minutes=10)
 
 
 class DaacFS:
     """S3 filesystems for the DAAC buckets, on temporary Earthdata credentials.
 
-    Holds one filesystem per bucket, created on first use and rebuilt with
-    fresh credentials when they near expiry or on refresh().
+    Holds one filesystem per bucket, created on first use. Callers call
+    refresh() when a read fails, e.g. once the credentials have expired.
     """
 
     def __init__(self):
         self.maap = MAAP(maap_host="api.maap-project.org")
         self._fs = {}
-        self._expires = {}
 
     def get_fs(self, s3url):
         bucket = _bucket(s3url)
-        now = datetime.datetime.now(datetime.timezone.utc)
-        if bucket not in self._fs or now >= self._expires[bucket] - REFRESH_MARGIN:
+        if bucket not in self._fs:
             self.refresh(s3url)
         return self._fs[bucket]
 
@@ -41,9 +35,6 @@ class DaacFS:
         bucket = _bucket(s3url)
         endpoint = DAAC_CREDENTIALS_ENDPOINTS[bucket]
         credentials = self.maap.aws.earthdata_s3_credentials(endpoint)
-        self._expires[bucket] = datetime.datetime.fromisoformat(
-            credentials["expiration"]
-        )
         self._fs[bucket] = fsspec.filesystem(
             "s3",
             key=credentials["accessKeyId"],
@@ -59,7 +50,7 @@ class DaacFS:
         logger.info(
             "Obtained Earthdata S3 credentials for %s, expiring %s.",
             bucket,
-            self._expires[bucket],
+            credentials["expiration"],
         )
 
 
