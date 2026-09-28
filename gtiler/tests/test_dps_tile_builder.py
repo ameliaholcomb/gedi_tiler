@@ -63,20 +63,20 @@ class _NullCheckpointer:
 
 
 class _LocalFSSpec:
-    """Stub RefreshableFSSpec that hands out a local fsspec filesystem.
+    """Stub DaacFS that hands out a local fsspec filesystem.
 
-    The fixture metadata's level*_url columns point at file:// paths, so
-    load_granule_product's `rfs.get_fs().open(...)` reads the mini HDF5
-    fixtures from disk instead of S3.
+    The fixture metadata's level*_url columns point at local paths, so
+    load_granule_product's `rfs.get_fs(url).get_file(...)` copies the mini
+    HDF5 fixtures from disk instead of S3.
     """
 
     def __init__(self, *args, **kwargs):
         self._fs = fsspec.filesystem("file")
 
-    def get_fs(self):
+    def get_fs(self, s3url):
         return self._fs
 
-    def refresh(self):
+    def refresh(self, s3url):
         pass
 
 
@@ -126,7 +126,7 @@ def run_pipeline_factory(dps_tile_builder, args, tmp_path):
 
     Patches:
       - load_tile_metadata → return the given metadata GeoDataFrame
-      - s3_utils.RefreshableFSSpec → local fsspec filesystem so the
+      - s3_utils.DaacFS → local fsspec filesystem so the
         fixture's file:// granule URLs are read from disk, not S3
       - ducky.data_prefix → local tmp_path (DuckDB COPY writes to disk)
       - checkpoint_lib.Checkpointer → no-op (bypasses S3 checkpoint state)
@@ -143,7 +143,7 @@ def run_pipeline_factory(dps_tile_builder, args, tmp_path):
         with patch.object(
             dps_tile_builder, "load_tile_metadata", return_value=metadata
         ), patch.object(
-            dps_tile_builder.s3_utils, "RefreshableFSSpec", _LocalFSSpec
+            dps_tile_builder.s3_utils, "DaacFS", _LocalFSSpec
         ), patch.object(
             dps_tile_builder.ducky, "data_prefix", return_value=local_prefix
         ), patch.object(

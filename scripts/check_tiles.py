@@ -1,4 +1,5 @@
 import argparse
+import fsspec
 import geopandas as gpd
 import logging
 import os
@@ -112,8 +113,7 @@ def main(args):
         FROM missing_granules
     """).fetchall()
     missing_tiles = [t[0] for t in missing_tiles]
-    rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
-    fs = rfs.get_fs()
+    fs = fsspec.filesystem("s3")
 
     for tile in missing_tiles:
         tile_dir = ducky.tile_data_dir(args.bucket, args.prefix, tile)

@@ -127,7 +127,6 @@ def boto_range_get(c, url, requester_pays):
 
 
 def s3fs_read(c, url, requester_pays):
-    # Same construction as gtiler.common.s3_utils.RefreshableFSSpec.
     fs = s3fs.S3FileSystem(
         key=c["key"],
         secret=c["secret"],
@@ -148,7 +147,7 @@ def _h5_summary(f):
 
 def h5py_stream(c, url, requester_pays):
     # The pre-download builder read: h5py over an fsspec file, with the
-    # filesystem built exactly as in s3_utils.RefreshableFSSpec.
+    # filesystem settings the v2 builder used.
     fs = fsspec.filesystem(
         "s3",
         key=c["key"],
@@ -177,23 +176,19 @@ METHODS = {
 }
 
 
-def old_builder_reads():
-    """The exact v2 builder path: RefreshableFSSpec, then h5py over open()."""
+def builder_reads():
+    """The builder's own path: s3_utils.DaacFS, then h5py over open()."""
     print()
-    try:
-        rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
-    except Exception as e:
-        print(f"OLD_BUILDER RefreshableFSSpec: FAIL {_error_code(e)}")
-        return
+    rfs = s3_utils.DaacFS()
     for uname, url in URLS.items():
         if not url.endswith(".h5"):
             continue
         try:
-            with rfs.get_fs().open(url, mode="rb") as f:
+            with rfs.get_fs(url).open(url, mode="rb") as f:
                 result = "OK " + _h5_summary(f)
         except Exception as e:
             result = "FAIL " + _error_code(e)
-        print(f"OLD_BUILDER {uname:<15} {result}")
+        print(f"BUILDER {uname:<15} {result}")
 
 
 def _error_code(e):
@@ -225,7 +220,7 @@ def main():
                     print(f"{cname:<18} {uname:<15} {str(rp):<5} {mname:<15} {result}")
     print()
     print(f"{ok} of {total} reads succeeded.")
-    old_builder_reads()
+    builder_reads()
 
 
 if __name__ == "__main__":

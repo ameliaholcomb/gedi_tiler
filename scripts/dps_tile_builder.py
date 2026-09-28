@@ -176,7 +176,7 @@ def _get_indices_in_tile(f, beam, geometry: GeometryColumn, tile):
 
 
 def load_granule_product(
-    rfs: s3_utils.RefreshableFSSpec,
+    rfs: s3_utils.DaacFS,
     s3url: str,
     product: Product,
     tile: Tile,
@@ -201,7 +201,7 @@ def load_granule_product(
     try:
         # Download first: h5py reads straight from S3 cost ~2 s per
         # dataset, against seconds for the whole file.
-        rfs.get_fs().get_file(s3url, local_path)
+        rfs.get_fs(s3url).get_file(s3url, local_path)
         with h5py.File(local_path, "r") as hdf5:
             full_df = []
             for k in hdf5.keys():
@@ -246,7 +246,7 @@ def load_granule_product(
             raise e
         # Try again with new credentials, but if that doesn't work, fail.
         logger.warning("Refreshing S3 credentials and retrying...")
-        rfs.refresh()
+        rfs.refresh(s3url)
         return load_granule_product(
             rfs, s3url, product, tile, work_dir, retry_count - 1
         )
@@ -278,7 +278,7 @@ def expected_variable_columns(product: Product) -> List[str]:
 
 
 def load_granule(
-    rfs: s3_utils.RefreshableFSSpec,
+    rfs: s3_utils.DaacFS,
     granule: str,
     product_files: List[Tuple[Product, str]],
     tile: Tile,
@@ -504,7 +504,7 @@ def build_tile(args: argparse.Namespace, work_dir: str):
     logger.info("Quality filtering is %s.", "on" if quality_filter else "off")
 
     # Set up access to the ORNL and LP DAACs
-    rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
+    rfs = s3_utils.DaacFS()
 
     batch_size = args.checkpoint_interval
     for i in range(0, len(granules_to_process), batch_size):
