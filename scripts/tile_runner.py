@@ -1,5 +1,6 @@
 import argparse
 import boto3
+import collections
 import fsspec
 import geopandas as gpd
 import logging
@@ -65,6 +66,18 @@ def get_queue(tile_id):
     else:
         return "maap-dps-worker-8gb"
 
+
+def choose_queue(tile_id, n_granules, large_tile_granules):
+    """The latitude band's queue, raised to 16 GB for tile-years with at
+    least large_tile_granules granules. Shots, and so memory, scale with
+    granule count; in the first Brazil run every job killed for memory on
+    8 GB had 55 or more."""
+    queue = get_queue(tile_id)
+    if n_granules >= large_tile_granules and queue == "maap-dps-worker-8gb":
+        return "maap-dps-worker-16gb"
+    return queue
+
+
 def _tile_year(path):
     """Pull the (tile_id, year) pair out of a partitioned data path."""
     parts = dict(p.split("=", 1) for p in path.split("/") if "=" in p)
@@ -92,11 +105,11 @@ def get_empty_tile_years(bucket, prefix):
 
 
 def required_tile_years(granules, start_year, end_year):
-    """(tile_id, year) pairs the granules cover, restricted to the years
-    this run was asked to build. Clamping matters: a granule spanning New
-    Year would otherwise create a sliver partition for a year that a later
-    run would then skip as already present."""
-    tile_years = set()
+    """Granule counts for the (tile_id, year) pairs the granules cover,
+    restricted to the years this run was asked to build. Clamping matters:
+    a granule spanning New Year would otherwise create a sliver partition
+    for a year that a later run would then skip as already present."""
+    tile_years = collections.Counter()
     for tile, start, end in zip(
         granules.tile_id, granules.time_start, granules.time_end
     ):
@@ -105,7 +118,7 @@ def required_tile_years(granules, start_year, end_year):
                 continue
             if end_year is not None and year > end_year:
                 continue
-            tile_years.add((tile, year))
+            tile_years[(tile, year)] += 1
     return tile_years
 
 
@@ -236,7 +249,7 @@ def main(args):
         )
         exit(1)
 
-    missing = sorted(required - existing)
+    missing = sorted(set(required) - existing)
     relevant_md_tiles = {x for x in existing_md if x in required_tiles}
     relevant_data = {x for x in existing if x in required}
     logger.info("%d tiles (%d tile-years) in the region.", len(required_tiles), len(required))
@@ -245,6 +258,13 @@ def main(args):
     logger.info("Planning to add metadata for %d new tiles.", len(required_tiles) - len(relevant_md_tiles))
     logger.info("(Which should match this number: %d)", tile_granule_gdf.tile_id.nunique())
     logger.info("Planning to create jobs to process data for %d tile-years.", len(missing))
+    queues = {
+        ty: args.queue
+        or choose_queue(ty[0], required[ty], args.large_tile_granules)
+        for ty in missing
+    }
+    for queue, n in sorted(collections.Counter(queues.values()).items()):
+        logger.info("%d jobs will go to %s.", n, queue)
 
     if args.dry_run:
         return
@@ -288,7 +308,7 @@ def main(args):
         for tile_id, year in batch:
             logger.info("Submitting job for tile %s year %d...", tile_id, year)
             job_name = f"tiler_{args.job_code}_{args.job_iteration}"
-            queue = args.queue or get_queue(tile_id)
+            queue = queues[(tile_id, year)]
             job = maap.submitJob(
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
@@ -356,7 +376,17 @@ if __name__ == "__main__":
         type=str,
         help=(
             "DPS queue for every job, e.g. maap-dps-worker-16gb to rerun "
-            "failures. Defaults to a per-latitude choice."
+            "failures. Defaults to a choice by latitude and granule count "
+            "(see --large_tile_granules)."
+        ),
+    )
+    parser.add_argument(
+        "--large_tile_granules",
+        type=int,
+        default=55,
+        help=(
+            "Tile-years with at least this many granules go to the 16 GB "
+            "queue (unless their latitude already calls for more)."
         ),
     )
     parser.add_argument(
