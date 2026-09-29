@@ -91,7 +91,7 @@ def _write_subset(
 
 
 def build_mini_granule(
-    rfs: s3_utils.RefreshableFSSpec,
+    rfs: s3_utils.DaacFS,
     src_urls: dict,  # {"level2A": url, ...}
     out_dir: pathlib.Path,
     granule_key: str,
@@ -103,7 +103,7 @@ def build_mini_granule(
     # Determine the in-tile shot_numbers per beam from the L2A file.
     l2a_product = PRODUCT_BY_LEVEL["level2A"]
     shot_numbers_by_beam: dict[str, np.ndarray] = {}
-    with rfs.get_fs().open(src_urls["level2A"], mode="rb") as f, h5py.File(f) as h:
+    with rfs.get_fs(src_urls["level2A"]).open(src_urls["level2A"], mode="rb") as f, h5py.File(f) as h:
         for beam in [k for k in h.keys() if k.startswith("BEAM")]:
             idx = _in_tile_indices(h, beam, l2a_product, tile)
             if len(idx) == 0:
@@ -120,7 +120,7 @@ def build_mini_granule(
     for level, url in src_urls.items():
         sds_paths = _sds_paths_for_product(PRODUCT_BY_LEVEL[level])
         local_path = out_dir / f"{granule_key}_{level}.h5"
-        with rfs.get_fs().open(url, mode="rb") as f, h5py.File(f) as src:
+        with rfs.get_fs(url).open(url, mode="rb") as f, h5py.File(f) as src:
             with h5py.File(local_path, "w") as dst:
                 _copy_attrs(src, dst)
                 for beam, target_shots in shot_numbers_by_beam.items():
@@ -143,7 +143,7 @@ def main():
     md = gpd.read_file(metadata_path)
     print(f"loaded fixture metadata with {len(md)} granules")
 
-    rfs = s3_utils.RefreshableFSSpec("/iam/maap-data-reader")
+    rfs = s3_utils.DaacFS()
     granules_dir = FIXTURES / "granules"
 
     new_rows = md.copy()

@@ -1,75 +1,61 @@
 import boto3
 import fsspec
 import logging
+from maap.maap import MAAP
 
 logger = logging.getLogger(__name__)
 
 
-class RefreshableFSSpec:
-    def __init__(self, ssm_parameter_name):
-        self.ssm_parameter_name = ssm_parameter_name
-        self.credentials = self.assume_role_credentials(self.ssm_parameter_name)
-        self.fs = self.fsspec_access(self.credentials)
+# Each DAAC issues its own temporary S3 credentials, good only for its own
+# buckets. They last an hour.
+DAAC_CREDENTIALS_ENDPOINTS = {
+    "lp-prod-protected": "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials",
+    "ornl-cumulus-prod-protected": "https://data.ornldaac.earthdata.nasa.gov/s3credentials",
+}
 
-    def refresh(self):
-        self.credentials = self.assume_role_credentials(self.ssm_parameter_name)
-        old_fs = self.fs
-        try:
-            old_fs.close()
-        except Exception:
-            pass
-        self.fs = self.fsspec_access(self.credentials)
 
-    def get_fs(self):
-        return self.fs
+class DaacFS:
+    """S3 filesystems for the DAAC buckets, on temporary Earthdata credentials.
 
-    def assume_role_credentials(self, ssm_parameter_name):
-        logger.info("Assuming role to access S3...")
-        # Create a session using the default personal credentials
-        session = boto3.Session()
+    Holds one filesystem per bucket, created on first use. Callers call
+    refresh() when a read fails, e.g. once the credentials have expired.
+    """
 
-        logger.info("Retrieving SSM parameter for role ARN...")
-        # Retrieve the SSM parameter
-        ssm = session.client("ssm", "us-west-2")
-        parameter = ssm.get_parameter(
-            Name=ssm_parameter_name, WithDecryption=True
-        )
-        parameter_value = parameter["Parameter"]["Value"]
-        logger.info("Assuming role: %s", parameter_value)
+    def __init__(self):
+        self.maap = MAAP(maap_host="api.maap-project.org")
+        self._fs = {}
 
-        # Assume the DAAC access role
-        sts = session.client("sts")
-        assumed_role_object = sts.assume_role(
-            RoleArn=parameter_value,
-            RoleSessionName="TutorialSession",
-        )
+    def get_fs(self, s3url):
+        bucket = _bucket(s3url)
+        if bucket not in self._fs:
+            self.refresh(s3url)
+        return self._fs[bucket]
 
-        # From the response that contains the assumed role, get the temporary
-        # credentials that can be used to make subsequent API calls
-        credentials = assumed_role_object["Credentials"]
-        logger.info("Role assumed, temporary credentials obtained.")
-
-        return credentials
-
-    def fsspec_access(self, credentials):
-        fsspec_kwargs = {
-            "default_cache_type": "mmap",
-            "default_block_size": 5 * 1024 * 1024,  # fsspec default is 5 MB
-            "default_fill_cache": True,
-        }
-        return fsspec.filesystem(
+    def refresh(self, s3url):
+        bucket = _bucket(s3url)
+        endpoint = DAAC_CREDENTIALS_ENDPOINTS[bucket]
+        credentials = self.maap.aws.earthdata_s3_credentials(endpoint)
+        self._fs[bucket] = fsspec.filesystem(
             "s3",
-            key=credentials["AccessKeyId"],
-            secret=credentials["SecretAccessKey"],
-            token=credentials["SessionToken"],
-            requester_pays=True,
+            key=credentials["accessKeyId"],
+            secret=credentials["secretAccessKey"],
+            token=credentials["sessionToken"],
+            skip_instance_cache=True,
             config_kwargs={
                 "read_timeout": 120,
                 "connect_timeout": 10,
                 "retries": {"max_attempts": 3, "mode": "adaptive"},
             },
-            **fsspec_kwargs,
         )
+        logger.info(
+            "Obtained Earthdata S3 credentials for %s, expiring %s.",
+            bucket,
+            credentials["expiration"],
+        )
+
+
+def _bucket(s3url):
+    return s3url.removeprefix("s3://").split("/", 1)[0]
 
 
 def s3_prefix_exists(s3_path: str) -> bool:

@@ -304,7 +304,7 @@ def main(args):
             )
         if i >= max_tasks:
             return
-        time.sleep(5 * 60)
+        time.sleep(2 * 60)
 
 
 if __name__ == "__main__":
