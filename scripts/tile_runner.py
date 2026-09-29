@@ -281,9 +281,8 @@ def main(args):
 
     # 4. Submit jobs for required tile-years not already in the database
     maap = MAAP()
-    # too many tasks result in quota limits on DAAC S3 reads
-    max_tasks = 900
-    # issue in batches of 50 every 5 minutes.
+    # Issue in batches of 50 every 2 minutes. The pace sets how many jobs
+    # run at once, which DAAC S3 read limits cap.
     for i in range(0, len(missing), 50):
         batch = missing[i : i + 50]
         for tile_id, year in batch:
@@ -302,8 +301,6 @@ def main(args):
                 generation=args.job_iteration,
                 checkpoint_interval=25,
             )
-        if i >= max_tasks:
-            return
         time.sleep(2 * 60)
 
 
