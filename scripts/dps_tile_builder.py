@@ -58,6 +58,17 @@ GRANULE_COLUMNS = [
     "quality_filter",
 ]
 
+# Datasets some granules lack, read as nulls of the given pandas dtype
+# where missing. The nullable dtype keeps the column's parquet type the
+# same as in files that have it. Six L4C V003 granules (orbits
+# 20757-20766) have only the rel2 WSCI quality flags.
+MISSING_SDS_DTYPES = {
+    "wsci_prediction/l4c_quality_flag_rel3_a1": "UInt8",
+    "wsci_prediction/l4c_quality_flag_rel3_a10": "UInt8",
+    "wsci_prediction/l4c_quality_flag_rel3_a2": "UInt8",
+    "wsci_prediction/l4c_quality_flag_rel3_a5": "UInt8",
+}
+
 def get_cmd_args():
     p = argparse.ArgumentParser(
         description="Generate hierarchical H3 database for fast spatial querying."
@@ -214,6 +225,15 @@ def load_granule_product(
                     if "ancillary" in v.SDS_Name.lower():
                         anci[v.variable] = hdf5[f"{k}/{v.SDS_Name}"][:][0]
                         continue
+                    if (
+                        v.SDS_Name in MISSING_SDS_DTYPES
+                        and f"{k}/{v.SDS_Name}" not in hdf5
+                    ):
+                        dfs[v.variable] = pd.array(
+                            [pd.NA] * len(idxs[0]),
+                            dtype=MISSING_SDS_DTYPES[v.SDS_Name],
+                        )
+                        continue
                     d = hdf5[f"{k}/{v.SDS_Name}"][idxs]
                     if d.ndim == 2:
                         # unroll profile data into separate columns
@@ -257,7 +277,7 @@ def load_granule_product(
     for j in anci.keys():
         full_df[j] = anci[j]
 
-    return full_df.dropna().set_index("shot_number")
+    return full_df.set_index("shot_number")
 
 
 def expected_variable_columns(product: Product) -> List[str]:

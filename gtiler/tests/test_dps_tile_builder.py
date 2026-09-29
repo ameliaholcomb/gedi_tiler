@@ -15,10 +15,12 @@ Run with:
 import argparse
 import importlib.util
 import pathlib
+import shutil
 import sys
 
 import duckdb
 import fsspec
+import h5py
 import geopandas as gpd
 import pandas as pd
 import pytest
@@ -430,6 +432,83 @@ class TestMissingProductUrl:
             "granule",
         ):
             assert col in df.columns, f"{col} missing from unified read"
+
+
+class TestMissingRel3WsciFlags:
+    """Some L4C granules have only the rel2 WSCI quality flags. Their shots
+    are kept, with the rel3 flags null and the column type unchanged."""
+
+    FLAGS = [
+        f"wsci_prediction_l4c_quality_flag_rel3_{a}_l4c"
+        for a in ("a1", "a10", "a2", "a5")
+    ]
+
+    @pytest.fixture
+    def metadata_rel2_only(self, fixture_metadata, tmp_path):
+        """First granule's L4C file with the rel3 WSCI flags removed."""
+        md = fixture_metadata.copy()
+        src = md["level4C_url"].iloc[0]
+        dst = tmp_path / "rel2_only" / pathlib.Path(src).name
+        dst.parent.mkdir()
+        shutil.copy(src, dst)
+        with h5py.File(dst, "r+") as f:
+            for beam in [k for k in f if k.startswith("BEAM")]:
+                for a in ("a1", "a10", "a2", "a5"):
+                    del f[f"{beam}/wsci_prediction/l4c_quality_flag_rel3_{a}"]
+        md.loc[md.index[0], "level4C_url"] = str(dst)
+        return md
+
+    def _schema(self, out_dir):
+        return duckdb.sql(f"""
+            SELECT name, type, logical_type
+            FROM parquet_schema('{_parquet_glob(out_dir)}')
+        """).df().set_index("name")
+
+    def test_flags_null_and_other_columns_kept(
+        self, run_pipeline_factory, fixture_metadata, metadata_rel2_only
+    ):
+        full = _read_output(run_pipeline_factory(fixture_metadata, "full"))
+        df = _read_output(run_pipeline_factory(metadata_rel2_only, "rel2"))
+        assert len(df) == len(full) > 0
+        for col in self.FLAGS:
+            assert df[col].isna().all(), col
+        for col in ("wsci_l4c", "l4c_quality_flag_rel3_l4c"):
+            assert df[col].notna().all(), col
+
+    def test_flag_types_match_a_normal_tile(
+        self, run_pipeline_factory, fixture_metadata, metadata_rel2_only
+    ):
+        full = self._schema(run_pipeline_factory(fixture_metadata, "full"))
+        rel2 = self._schema(run_pipeline_factory(metadata_rel2_only, "rel2"))
+        assert rel2.loc[self.FLAGS].equals(full.loc[self.FLAGS])
+
+
+class TestNanValuesKept:
+    """Shots with NaN in some columns (e.g. an L2B retrieval that failed)
+    are kept, with the NaN in place."""
+
+    @pytest.fixture
+    def metadata_nan_cover(self, fixture_metadata, tmp_path):
+        """First granule's L2B file with cover set to NaN on every shot."""
+        md = fixture_metadata.copy()
+        src = md["level2B_url"].iloc[0]
+        dst = tmp_path / "nan_cover" / pathlib.Path(src).name
+        dst.parent.mkdir()
+        shutil.copy(src, dst)
+        with h5py.File(dst, "r+") as f:
+            for beam in [k for k in f if k.startswith("BEAM")]:
+                f[f"{beam}/cover"][...] = float("nan")
+        md.loc[md.index[0], "level2B_url"] = str(dst)
+        return md
+
+    def test_shots_with_nan_are_kept(
+        self, run_pipeline_factory, fixture_metadata, metadata_nan_cover
+    ):
+        full = _read_output(run_pipeline_factory(fixture_metadata, "full"))
+        df = _read_output(run_pipeline_factory(metadata_nan_cover, "nan"))
+        assert len(df) == len(full) > 0
+        assert df["cover_l2b"].isna().all()
+        assert df["pai_l2b"].notna().all()
 
 
 class TestQualityFilter:
