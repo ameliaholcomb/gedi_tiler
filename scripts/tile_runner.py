@@ -281,8 +281,8 @@ def main(args):
 
     # 4. Submit jobs for required tile-years not already in the database
     maap = MAAP()
-    # Issue in batches of 50 every 2 minutes. The pace sets how many jobs
-    # run at once, which DAAC S3 read limits cap.
+    # Issue in batches of 50. The pace sets how many jobs run at once,
+    # which DAAC S3 read limits cap.
     for i in range(0, len(missing), 50):
         batch = missing[i : i + 50]
         for tile_id, year in batch:
@@ -301,7 +301,7 @@ def main(args):
                 generation=args.job_iteration,
                 checkpoint_interval=25,
             )
-        time.sleep(2 * 60)
+        time.sleep(args.submit_interval * 60)
 
 
 if __name__ == "__main__":
@@ -357,6 +357,17 @@ if __name__ == "__main__":
         help=(
             "DPS queue for every job, e.g. maap-dps-worker-16gb to rerun "
             "failures. Defaults to a per-latitude choice."
+        ),
+    )
+    parser.add_argument(
+        "--submit_interval",
+        type=float,
+        required=True,
+        help=(
+            "Minutes to wait between batches of 50 jobs. With jobs starting "
+            "at once, this sets how many run together: 5 kept ~290 of the "
+            "~25-minute Brazil jobs running. Regions with longer jobs need "
+            "5 or more."
         ),
     )
     parser.add_argument(
