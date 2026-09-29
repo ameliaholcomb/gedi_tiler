@@ -34,16 +34,15 @@ EASE_Y_SCALE = 1000.895023349562052
 # L2A, is ~2 GB). The final sort reads a staged local copy of the rows, is
 # capped at DUCKDB_MEMORY_LIMIT, and spills at most DUCKDB_MAX_TEMP to the
 # same directory. A 200k-row group at v3 width takes ~3.2 GB of that in
-# the parquet writer. One thread keeps the sort within the limit and the
-# output in exact Hilbert order. On the busiest Brazil tile-year (783k
-# shots) the write peaks at ~5 GB RSS with ~4.3 GB spilled, in ~2 min.
-# (A 5 GB limit ran out of memory there, where 4 GB did not.)
+# the parquet writer, so the sort writes a local copy in small row groups
+# and a second pass copies it into the output. One thread keeps the sort
+# within the limit and the output in exact Hilbert order.
 DUCKDB_MEMORY_LIMIT = "4GB"
 DUCKDB_MAX_TEMP = "15GB"
 DUCKDB_THREADS = 1
 ROW_GROUP_SIZE = 200_000
-# Row group size for the unsorted local copy the final sort reads from.
-# Small, so that staging it costs little memory on top of the frame.
+# Row group size for the local copies before and after the sort.
+# Small, so that writing them costs little memory.
 STAGE_ROW_GROUP_SIZE = 50_000
 
 # Columns read from the tile metadata. The geometry columns are not
@@ -407,19 +406,22 @@ def stage_tile(con, full_df: pd.DataFrame, path: str):
     con.unregister("full_df")
 
 
-def write_tile(con, staged: str, tile: Tile, year: int, out_prefix: str):
+def write_tile(con, staged: str, tile: Tile, year: int, work_dir: str, out_prefix: str):
     """Add the geometry and grid columns to the staged rows and write the
     tile-year as Hilbert-ordered GeoParquet under out_prefix, partitioned
-    by tile and year."""
+    by tile and year.
+
+    Sorts into a local file first, then copies that into the output. In one
+    query the sort and the output's 200k-row group buffer run out of memory
+    together on mid-sized tile-years (~340k-520k shots); apart, each fits.
+    """
     tile_bounds = (
         f"ST_MakeBox2D(ST_Point({tile.minx}, {tile.miny}), "
         f"ST_Point({tile.maxx}, {tile.maxy}))"
     )
-    # PARTITION_BY buffers this many rows per partition before flushing
-    # (default 524,288, ~2.6 GB at v3 row width).
-    con.execute(f"SET partitioned_write_flush_threshold = {ROW_GROUP_SIZE};")
     con.execute("INSTALL h3 FROM community;")
     con.load_extension("h3")
+    sorted_path = os.path.join(work_dir, "sorted.parquet")
     con.sql(f"""--sql
         COPY (
             SELECT *,
@@ -435,6 +437,22 @@ def write_tile(con, staged: str, tile: Tile, year: int, out_prefix: str):
                 {year} AS year
             FROM read_parquet('{staged}')
             ORDER BY ST_Hilbert(geometry, {tile_bounds})
+        ) TO '{sorted_path}' (
+            FORMAT parquet,
+            COMPRESSION zstd,
+            ROW_GROUP_SIZE {STAGE_ROW_GROUP_SIZE}
+        );
+    """)
+    pathlib.Path(staged).unlink()
+
+    # Keep the sorted order through the copy.
+    con.execute("SET preserve_insertion_order = true;")
+    # PARTITION_BY buffers this many rows per partition before flushing
+    # (default 524,288, ~2.6 GB at v3 row width).
+    con.execute(f"SET partitioned_write_flush_threshold = {ROW_GROUP_SIZE};")
+    con.sql(f"""--sql
+        COPY (
+            SELECT * FROM read_parquet('{sorted_path}')
         ) TO '{out_prefix}' (
             FORMAT parquet,
             GEOPARQUET_VERSION 'V2',
@@ -566,6 +584,7 @@ def build_tile(args: argparse.Namespace, work_dir: str):
         staged,
         args.tile,
         args.year,
+        work_dir,
         ducky.data_prefix(args.bucket, args.prefix),
     )
 
