@@ -1,4 +1,5 @@
 import boto3
+from botocore.exceptions import ClientError
 import fsspec
 import logging
 from maap.maap import MAAP
@@ -70,11 +71,34 @@ def s3_prefix_exists(s3_path: str) -> bool:
     return fs.exists(s3_path)
 
 
-def write_empty_file(path: str) -> None:
-    """Create a zero-byte file at path, which may be local or on S3."""
-    fs, p = fsspec.core.url_to_fs(path)
-    fs.makedirs(p.rsplit("/", 1)[0], exist_ok=True)
-    fs.pipe_file(p, b"")
+def object_etag(bucket: str, key: str) -> str:
+    """The object's ETag, or None if it does not exist."""
+    try:
+        return boto3.client("s3").head_object(Bucket=bucket, Key=key)["ETag"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return None
+        raise
+
+
+def conditional_put(
+    bucket: str,
+    key: str,
+    body: bytes,
+    *,
+    if_match: str = None,
+    if_none_match: str = None,
+) -> str:
+    """Write a small object on the same conditions as
+    conditional_multipart_put. Returns the new ETag."""
+    kw = {}
+    if if_match is not None:
+        kw["IfMatch"] = if_match
+    if if_none_match is not None:
+        kw["IfNoneMatch"] = if_none_match
+    return boto3.client("s3").put_object(
+        Bucket=bucket, Key=key, Body=body, **kw
+    )["ETag"]
 
 
 def conditional_multipart_put(

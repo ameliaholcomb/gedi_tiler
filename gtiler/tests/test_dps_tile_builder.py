@@ -13,19 +13,23 @@ Run with:
 """
 
 import argparse
+import contextlib
 import importlib.util
 import pathlib
 import shutil
 import sys
 
+import boto3
 import duckdb
 import fsspec
 import h5py
 import geopandas as gpd
 import pandas as pd
 import pytest
+from moto import mock_aws
 from unittest.mock import patch
 
+from gtiler.common import checkpoint_lib, s3_utils
 from gtiler.database.tiles import Tile
 
 
@@ -51,17 +55,32 @@ def _import_dps_tile_builder():
     return module
 
 
-class _NullCheckpointer:
-    """Stub Checkpointer that bypasses S3 — no prior state, writes are no-ops."""
+class _LocalCheckpointer:
+    """Stub Checkpointer that bypasses S3: there is no prior progress, and
+    commit copies the output to its key's place under out_dir."""
 
-    def __init__(self, *args, **kwargs):
-        pass
+    out_dir = None
 
-    def initialize(self):
-        return None
+    def __init__(self, bucket, prefix, *args, **kwargs):
+        self.prefix = prefix
 
-    def write_checkpoint(self, *args, **kwargs):
-        pass
+    def initialize(self, granules, output_keys):
+        self.manifest = checkpoint_lib.Manifest(0, "test", list(granules))
+        return self.manifest
+
+    def download_parts(self, work_dir):
+        return []
+
+    def add_batch(self, local_part, remaining):
+        self.manifest.remaining = list(remaining)
+
+    def commit(self, local_path, output_key):
+        dest = self.out_dir / output_key.removeprefix(f"{self.prefix}/data/")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if local_path is None:
+            dest.write_bytes(b"")
+        else:
+            shutil.copy(local_path, dest)
 
 
 class _LocalFSSpec:
@@ -130,8 +149,8 @@ def run_pipeline_factory(dps_tile_builder, args, tmp_path):
       - load_tile_metadata → return the given metadata GeoDataFrame
       - s3_utils.DaacFS → local fsspec filesystem so the
         fixture's file:// granule URLs are read from disk, not S3
-      - ducky.data_prefix → local tmp_path (DuckDB COPY writes to disk)
-      - checkpoint_lib.Checkpointer → no-op (bypasses S3 checkpoint state)
+      - checkpoint_lib.Checkpointer → no prior progress; the output is
+        copied under the output directory instead of uploaded
 
     Pass `subdir` to isolate two runs in the same test (e.g. to compare
     schemas across tiles); without it, the output lands directly under
@@ -141,15 +160,14 @@ def run_pipeline_factory(dps_tile_builder, args, tmp_path):
     def _run(metadata, subdir=None):
         out_dir = tmp_path / subdir if subdir else tmp_path
         out_dir.mkdir(parents=True, exist_ok=True)
-        local_prefix = str(out_dir) + "/"
         with patch.object(
             dps_tile_builder, "load_tile_metadata", return_value=metadata
         ), patch.object(
             dps_tile_builder.s3_utils, "DaacFS", _LocalFSSpec
         ), patch.object(
-            dps_tile_builder.ducky, "data_prefix", return_value=local_prefix
-        ), patch.object(
-            dps_tile_builder.checkpoint_lib, "Checkpointer", _NullCheckpointer
+            dps_tile_builder.checkpoint_lib,
+            "Checkpointer",
+            type("Checkpointer", (_LocalCheckpointer,), {"out_dir": out_dir}),
         ):
             dps_tile_builder.run_main(args)
         return out_dir
@@ -665,3 +683,157 @@ class TestSelectGranulesForYear:
         for year in (2023, 2024):
             got = dps_tile_builder.select_granules_for_year(g, year)
             assert list(got["granule_key"]) == ["g0"], year
+
+
+def _schema(out_dir):
+    return duckdb.sql(f"""
+        SELECT name, type, logical_type, converted_type
+        FROM parquet_schema('{_parquet_glob(out_dir)}')
+    """).df()
+
+
+class TestOutputTypes:
+    """Every column is written as its schema type, whichever products and
+    datasets a tile-year's granules have."""
+
+    def test_columns_have_their_schema_types(self, dps_tile_builder, run_pipeline):
+        types = {
+            r[0]: r[1]
+            for r in duckdb.sql(f"""
+                DESCRIBE SELECT * FROM read_parquet(
+                    '{_parquet_glob(run_pipeline)}', hive_partitioning=false
+                )
+            """).fetchall()
+        }
+        for name, dtype in dps_tile_builder.part_columns():
+            expected = dps_tile_builder.PART_DUCKDB_TYPES[dtype]
+            assert types[name] == {"TIMESTAMPTZ": "TIMESTAMP WITH TIME ZONE"}.get(
+                expected, expected
+            ), name
+
+    def test_missing_product_writes_the_same_schema(
+        self, run_pipeline_factory, fixture_metadata
+    ):
+        md = fixture_metadata.copy()
+        md.loc[md.index[0], "level4C_url"] = None
+        full = _schema(run_pipeline_factory(fixture_metadata, "full"))
+        missing = _schema(run_pipeline_factory(md, "missing"))
+        pd.testing.assert_frame_equal(full, missing)
+
+
+class TestLocalFiles:
+    def test_nothing_is_left_in_the_working_directory(
+        self, run_pipeline_factory, fixture_metadata, tmp_path, monkeypatch
+    ):
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        run_pipeline_factory(fixture_metadata, "out")
+        assert not list(cwd.iterdir())
+
+
+class TestCheckpointedRun:
+    """The pipeline against the real Checkpointer, on moto's S3. Both
+    fixture granules are planned for the year, one per batch; only the
+    first has shots in it."""
+
+    OUTPUT_KEY = (
+        f"test/prefix/data/tile_id={TILE_ID}/year=2021/data_0.parquet"
+    )
+    MANIFEST_KEY = f"test/prefix/checkpoints/{TILE_ID}/2021/manifest.json"
+
+    @pytest.fixture
+    def s3(self):
+        def single_put(bucket, key, body, *, if_match=None, if_none_match=None):
+            return s3_utils.conditional_put(
+                bucket, key, body.read(),
+                if_match=if_match, if_none_match=if_none_match,
+            )
+
+        with mock_aws(), patch.object(
+            s3_utils, "conditional_multipart_put", single_put
+        ):
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="test-bucket")
+            yield client
+
+    @pytest.fixture
+    def both_granules(self, fixture_metadata):
+        md = fixture_metadata.copy()
+        md["time_start"] = pd.Timestamp("2021-06-01", tz="UTC")
+        return md
+
+    def _run(self, dps_tile_builder, args, metadata, load_granule=None):
+        args.checkpoint_interval = 1
+        patches = [
+            patch.object(dps_tile_builder, "load_tile_metadata", return_value=metadata),
+            patch.object(dps_tile_builder.s3_utils, "DaacFS", _LocalFSSpec),
+        ]
+        if load_granule:
+            patches.append(patch.object(dps_tile_builder, "load_granule", load_granule))
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            dps_tile_builder.run_main(args)
+
+    def _output(self, s3, tmp_path, name):
+        path = tmp_path / name
+        s3.download_file("test-bucket", self.OUTPUT_KEY, str(path))
+        return pd.read_parquet(path)
+
+    def _keys(self, s3):
+        return sorted(
+            o["Key"] for o in s3.list_objects_v2(Bucket="test-bucket").get("Contents", [])
+        )
+
+    def test_writes_output_and_leaves_only_the_manifest(
+        self, s3, dps_tile_builder, args, both_granules, tmp_path
+    ):
+        self._run(dps_tile_builder, args, both_granules)
+        assert len(self._output(s3, tmp_path, "out.parquet")) > 0
+        assert self._keys(s3) == sorted([self.MANIFEST_KEY, self.OUTPUT_KEY])
+
+    def test_resumes_after_a_crash(
+        self, s3, dps_tile_builder, args, both_granules, tmp_path
+    ):
+        real = dps_tile_builder.load_granule
+        self._run(dps_tile_builder, args, both_granules)
+        expected = self._output(s3, tmp_path, "expected.parquet")
+        s3.delete_object(Bucket="test-bucket", Key=self.OUTPUT_KEY)
+        s3.delete_object(Bucket="test-bucket", Key=self.MANIFEST_KEY)
+
+        def crash_on_second(granule, **kw):
+            if granule == "O20346_01":
+                raise RuntimeError("killed")
+            return real(granule=granule, **kw)
+
+        with pytest.raises(RuntimeError, match="killed"):
+            self._run(dps_tile_builder, args, both_granules, crash_on_second)
+        assert not _exists(s3, self.OUTPUT_KEY)
+
+        loaded = []
+
+        def record(granule, **kw):
+            loaded.append(granule)
+            return real(granule=granule, **kw)
+
+        self._run(dps_tile_builder, args, both_granules, record)
+        assert loaded == ["O20346_01"]
+        pd.testing.assert_frame_equal(
+            self._output(s3, tmp_path, "resumed.parquet"), expected
+        )
+
+    def test_a_second_job_finds_it_built(
+        self, s3, dps_tile_builder, args, both_granules
+    ):
+        self._run(dps_tile_builder, args, both_granules)
+        loaded = []
+        self._run(
+            dps_tile_builder, args, both_granules,
+            lambda granule, **kw: loaded.append(granule),
+        )
+        assert loaded == []
+
+
+def _exists(s3, key):
+    return "Contents" in s3.list_objects_v2(Bucket="test-bucket", Prefix=key)
