@@ -33,7 +33,37 @@ DUCKDB_TYPES = {
     "float32": "FLOAT",
     "float64": "DOUBLE",
     "str": "VARCHAR",
+    "datetime64[ns, UTC]": "TIMESTAMPTZ",
 }
+
+# The version of the tile-year file layout, recorded in each file's
+# parquet key-value metadata under VERSION_KEY. Version 4 stores each
+# profile as one list column; version 3 files (and those recording no
+# version) flattened profiles into one column per bin.
+SCHEMA_VERSION = 4
+VERSION_KEY = "gtiler_schema_version"
+
+
+def file_version(key_value_metadata) -> int:
+    """The layout version a file records, given its parquet key-value
+    metadata (pyarrow's FileMetaData.metadata). Files from before versions
+    were recorded are version 3."""
+    return int((key_value_metadata or {}).get(VERSION_KEY.encode(), b"3"))
+
+# DuckDB COPY options for tile-year files. zstd decompresses at the same
+# speed whatever the level, so a high level costs only write time.
+# PARQUET_VERSION V2 adds encodings (BYTE_STREAM_SPLIT for floats, delta
+# for integers and strings) that shrink the files.
+TILE_ROW_GROUP_SIZE = 200_000
+TILE_COPY_OPTIONS = f"""
+    FORMAT parquet,
+    GEOPARQUET_VERSION 'V2',
+    PARQUET_VERSION V2,
+    COMPRESSION zstd,
+    COMPRESSION_LEVEL 9,
+    ROW_GROUP_SIZE {TILE_ROW_GROUP_SIZE},
+    KV_METADATA {{{VERSION_KEY}: '{SCHEMA_VERSION}'}}
+"""
 
 
 @dataclass
@@ -45,12 +75,16 @@ class Column:
     # give L4A degrade_include_flag as UINT8 (it is bool) and
     # elev_highestreturn_outlier_flag as FLOAT32 (it is uint8).
     dtype: str
+    # A profile is a 2-D dataset, stored as one list column of its bins
+    # along the second axis (e.g. rh_l2a[1] .. rh_l2a[101], a FLOAT[]).
     is_profile: bool = False
-    # For profile columns, the number of bins along the second HDF5
-    # axis. Used to expand the variable into per-bin DataFrame columns
-    # (e.g. rh -> rh_0..rh_100) even when the source granule is absent
-    # and the columns need to be NaN-filled.
+    # For profile columns, the number of bins: the length of every list.
     n_bins: int = 0
+
+    @property
+    def duckdb_type(self) -> str:
+        base = DUCKDB_TYPES[self.dtype]
+        return f"{base}[]" if self.is_profile else base
 
 
 @dataclass
@@ -100,9 +134,10 @@ SHOT_GEOMETRY = GeometryColumn(
 )
 
 # Define the schema for the tiled GEDI v3 database.
-# Source variables are named <group>_<name>_<product> (e.g. agbd_l4a); profiles
-# expand to <variable>_<bin> (e.g. rh_l2a_98). A variable repeated across
-# products is kept only from the lowest product level.
+# Source variables are named <group>_<name>_<product> (e.g. agbd_l4a);
+# profiles are list columns (rh_l2a, with rh_l2a[99] the 98th percentile).
+# A variable repeated across products is kept only from the lowest product
+# level.
 # fmt: off
 SCHEMA = Table(
     name="tiled_gedi_database_v3",

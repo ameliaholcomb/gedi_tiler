@@ -24,12 +24,15 @@ import duckdb
 import fsspec
 import h5py
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 from moto import mock_aws
 from unittest.mock import patch
 
 from gtiler.common import checkpoint_lib, s3_utils
+from gtiler.database.schema_v3 import SCHEMA, SCHEMA_VERSION, VERSION_KEY
 from gtiler.database.tiles import Tile
 
 
@@ -705,11 +708,11 @@ class TestOutputTypes:
                 )
             """).fetchall()
         }
-        for name, dtype in dps_tile_builder.part_columns():
-            expected = dps_tile_builder.PART_DUCKDB_TYPES[dtype]
-            assert types[name] == {"TIMESTAMPTZ": "TIMESTAMP WITH TIME ZONE"}.get(
+        for c in dps_tile_builder.part_columns():
+            expected = c.duckdb_type
+            assert types[c.variable] == {"TIMESTAMPTZ": "TIMESTAMP WITH TIME ZONE"}.get(
                 expected, expected
-            ), name
+            ), c.variable
 
     def test_missing_product_writes_the_same_schema(
         self, run_pipeline_factory, fixture_metadata
@@ -719,6 +722,55 @@ class TestOutputTypes:
         full = _schema(run_pipeline_factory(fixture_metadata, "full"))
         missing = _schema(run_pipeline_factory(md, "missing"))
         pd.testing.assert_frame_equal(full, missing)
+
+
+class TestProfiles:
+    """Each profile is one list column of its bins, as the schema says."""
+
+    PROFILES = [v for p in SCHEMA.products for v in p.variables if v.is_profile]
+
+    def test_every_list_has_the_schema_bin_count(self, run_pipeline):
+        con = duckdb.connect()
+        for v in self.PROFILES:
+            bad = con.sql(f"""
+                SELECT count(*) FROM '{_parquet_glob(run_pipeline)}'
+                WHERE len("{v.variable}") != {v.n_bins}
+            """).fetchone()[0]
+            assert bad == 0, v.variable
+
+    def test_lists_hold_the_granule_values_in_bin_order(
+        self, run_pipeline, fixture_metadata
+    ):
+        con = duckdb.connect()
+        shot, beam, granule, rh = con.sql(f"""
+            SELECT shot_number, beam_name, granule, rh_l2a
+            FROM '{_parquet_glob(run_pipeline)}'
+            WHERE list_distinct(rh_l2a) != [rh_l2a[1]]  -- not all one value
+            LIMIT 1
+        """).fetchone()
+        url = fixture_metadata.set_index("granule_key").loc[granule, "level2A_url"]
+        with h5py.File(url) as f:
+            i = np.flatnonzero(f[f"{beam}/shot_number"][:] == shot)[0]
+            expected = f[f"{beam}/rh"][i]
+        np.testing.assert_array_equal(np.array(rh, dtype=np.float32), expected)
+
+    def test_missing_product_profiles_are_null_lists(
+        self, run_pipeline_factory, fixture_metadata
+    ):
+        md = fixture_metadata.copy()
+        md["level4A_url"] = None
+        out = run_pipeline_factory(md)
+        n, n_null, typ = duckdb.sql(f"""
+            SELECT count(*), count(*) FILTER (xvar_l4a IS NULL), typeof(any_value(xvar_l4a))
+            FROM '{_parquet_glob(out)}'
+        """).fetchone()
+        assert n_null == n > 0
+        assert typ == "FLOAT[]"
+
+    def test_file_records_the_schema_version(self, run_pipeline):
+        (path,) = (run_pipeline / f"tile_id={TILE_ID}").glob("year=*/*.parquet")
+        metadata = pq.read_metadata(path).metadata
+        assert metadata[VERSION_KEY.encode()] == str(SCHEMA_VERSION).encode()
 
 
 class TestLocalFiles:

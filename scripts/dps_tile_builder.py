@@ -8,6 +8,7 @@ import os
 import pandas as pd
 import pathlib
 import psutil
+import pyarrow as pa
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,7 @@ from gtiler.database import ducky
 from gtiler.database.tiles import Tile
 from gtiler.common import s3_utils
 from gtiler.common import checkpoint_lib
-from gtiler.database.schema_v3 import SCHEMA, DUCKDB_TYPES, NULLABLE_DTYPES
+from gtiler.database.schema_v3 import SCHEMA, NULLABLE_DTYPES, TILE_COPY_OPTIONS
 from gtiler.database.schema_v3 import Column, Product, GeometryColumn  # typing only
 
 logger = logging.getLogger(__name__)
@@ -35,15 +36,14 @@ EASE_Y_SCALE = 1000.895023349562052
 # L2A, is ~2 GB). Each batch's shots are written to a local parquet part
 # (also uploaded as a checkpoint), so only one batch is held in memory. The
 # final sort reads the parts, is capped at DUCKDB_MEMORY_LIMIT, and spills
-# at most DUCKDB_MAX_TEMP to the same directory. A 200k-row group at v3
-# width takes ~3.2 GB of that in the parquet writer, so the sort writes a
+# at most DUCKDB_MAX_TEMP to the same directory. A 200k-row group at
+# full width took ~3.2 GB of that in the parquet writer, so the sort writes a
 # local copy in small row groups and a second pass copies it into the
 # output. One thread keeps the sort within the limit and the output in
 # exact Hilbert order.
 DUCKDB_MEMORY_LIMIT = "4GB"
 DUCKDB_MAX_TEMP = "15GB"
 DUCKDB_THREADS = 1
-ROW_GROUP_SIZE = 200_000
 # Row group size for the parts and the sorted local copy.
 # Small, so that writing them costs little memory.
 STAGE_ROW_GROUP_SIZE = 50_000
@@ -70,7 +70,6 @@ MISSING_SDS = {
     "wsci_prediction/l4c_quality_flag_rel3_a5",
 }
 # Types of the columns the builder adds, beyond the schema's.
-PART_DUCKDB_TYPES = {**DUCKDB_TYPES, "datetime64[ns, UTC]": "TIMESTAMPTZ"}
 
 def get_cmd_args():
     p = argparse.ArgumentParser(
@@ -225,6 +224,8 @@ def _read_dataset(hdf5, path: str, column: Column, idxs) -> np.ndarray:
         return d.astype(str)
     if d.dtype != column.dtype:
         raise TypeError(f"{path} is {d.dtype}, schema says {column.dtype}")
+    if column.is_profile and d.shape[1:] != (column.n_bins,):
+        raise ValueError(f"{path} has shape {d.shape}, schema says {column.n_bins} bins")
     return d
 
 
@@ -264,12 +265,7 @@ def load_granule_product(
                         )
                         continue
                     d = _read_dataset(hdf5, path, v, idxs)
-                    if d.ndim == 2:
-                        # unroll profile data into separate columns
-                        for col in range(d.shape[-1]):
-                            dfs[f"{v.variable}_{col}"] = d[:, col]
-                    else:
-                        dfs[v.variable] = d
+                    dfs[v.variable] = profile_series(d) if v.is_profile else d
                 dfs = pd.DataFrame(dfs)
                 dfs["beam_name"] = k
                 full_df.append(dfs)
@@ -281,40 +277,38 @@ def load_granule_product(
     return full_df.set_index("shot_number")
 
 
-def expected_variable_columns(product: Product) -> List[Tuple[str, str]]:
-    """The (name, dtype) of each dataframe column load_granule_product
-    makes from `product.variables`, expanding profile columns into
-    `<name>_<bin>`. Excludes shot_number and geometry, which come from
-    the first available product."""
-    cols = []
-    for v in product.variables:
-        if v.is_profile:
-            cols.extend((f"{v.variable}_{i}", v.dtype) for i in range(v.n_bins))
-        else:
-            cols.append((v.variable, v.dtype))
-    return cols
+def profile_series(d: np.ndarray) -> pd.Series:
+    """A profile's 2-D values as a column of lists, one per shot, backed by
+    one Arrow array."""
+    values = pa.FixedSizeListArray.from_arrays(pa.array(d.reshape(-1)), d.shape[1])
+    return pd.Series(pd.arrays.ArrowExtensionArray(values))
 
 
-def part_columns() -> List[Tuple[str, str]]:
-    """The (name, dtype) of each column of a checkpoint part, in the order
-    the output keeps them."""
+def null_series(column: Column, index: pd.Index) -> pd.Series:
+    """An all-null column of the column's type."""
+    if column.is_profile:
+        element = pa.from_numpy_dtype(np.dtype(column.dtype))
+        values = pa.nulls(len(index), pa.list_(element, column.n_bins))
+        return pd.Series(pd.arrays.ArrowExtensionArray(values), index=index)
+    return pd.Series(pd.NA, index=index, dtype=NULLABLE_DTYPES[column.dtype])
+
+
+def part_columns() -> List[Column]:
+    """The columns of a checkpoint part, in the order the output keeps
+    them. The geometry and grid columns are added when the tile is
+    written."""
     first, *rest = SCHEMA.products
     geometry = first.geometry
-    cols = [(first.primary_key.variable, first.primary_key.dtype)]
-    cols += expected_variable_columns(first)
-    cols += [
-        (geometry.lat.variable, geometry.lat.dtype),
-        (geometry.lon.variable, geometry.lon.dtype),
-        ("beam_name", "str"),
-    ]
+    cols = [first.primary_key, *first.variables, geometry.lat, geometry.lon]
+    cols.append(Column(variable="beam_name", SDS_Name="", dtype="str"))
     for product in rest:
-        cols += expected_variable_columns(product)
-    cols.append(("granule", "str"))
+        cols += product.variables
+    cols.append(Column(variable="granule", SDS_Name="", dtype="str"))
     cols += [
-        (f"root_file_{p.product_level.name.lower()}", "str")
+        Column(variable=f"root_file_{p.product_level.name.lower()}", SDS_Name="", dtype="str")
         for p in SCHEMA.products
     ]
-    cols.append(("absolute_time", "datetime64[ns, UTC]"))
+    cols.append(Column(variable="absolute_time", SDS_Name="", dtype="datetime64[ns, UTC]"))
     return cols
 
 
@@ -377,10 +371,8 @@ def load_granule(
 
     # Null-fill columns for products with null URLs in the metadata.
     for product_schema in missing:
-        for col, dtype in expected_variable_columns(product_schema):
-            full_df[col] = pd.Series(
-                pd.NA, index=full_df.index, dtype=NULLABLE_DTYPES[dtype]
-            )
+        for column in product_schema.variables:
+            full_df[column.variable] = null_series(column, full_df.index)
 
     # Add derived data columns
     full_df["granule"] = granule
@@ -441,32 +433,38 @@ def write_part(con, df: pd.DataFrame, path: str):
     output order and cast to their schema types, so that every part of
     every tile-year has the same parquet schema."""
     columns = part_columns()
-    names = [n for n, _ in columns]
+    names = [c.variable for c in columns]
     if set(df.columns) != set(names):
         raise ValueError(
             f"Batch columns differ from the schema: missing "
             f"{sorted(set(names) - set(df.columns))}, extra "
             f"{sorted(set(df.columns) - set(names))}"
         )
-    for name, dtype in columns:
-        actual = str(df[name].dtype)
-        allowed = {dtype, NULLABLE_DTYPES.get(dtype)}
-        if dtype == "str":
-            allowed |= {"object"}
-        if actual not in allowed:
-            raise TypeError(f"Column {name} is {actual}, schema says {dtype}")
+    for c in columns:
+        actual = df[c.variable].dtype
+        if c.is_profile:
+            element = pa.from_numpy_dtype(np.dtype(c.dtype))
+            ok = actual == pd.ArrowDtype(pa.list_(element, c.n_bins))
+        else:
+            allowed = {c.dtype, NULLABLE_DTYPES.get(c.dtype)}
+            if c.dtype == "str":
+                allowed |= {"object"}
+            ok = str(actual) in allowed
+        if not ok:
+            raise TypeError(f"Column {c.variable} is {actual}, schema says {c.dtype}")
     select = ", ".join(
-        f'CAST("{n}" AS {PART_DUCKDB_TYPES[t]}) AS "{n}"' for n, t in columns
+        f'CAST("{c.variable}" AS {c.duckdb_type}) AS "{c.variable}"' for c in columns
     )
-    con.register("part_df", df)
+    part = pa.Table.from_pandas(df[names], preserve_index=False)
+    con.register("part_table", part)
     con.sql(f"""
-        COPY (SELECT {select} FROM part_df) TO '{path}' (
+        COPY (SELECT {select} FROM part_table) TO '{path}' (
             FORMAT parquet,
             COMPRESSION zstd,
             ROW_GROUP_SIZE {STAGE_ROW_GROUP_SIZE}
         );
     """)
-    con.unregister("part_df")
+    con.unregister("part_table")
 
 
 def write_tile(con, parts: List[str], tile: Tile, work_dir: str) -> str:
@@ -515,12 +513,7 @@ def write_tile(con, parts: List[str], tile: Tile, work_dir: str) -> str:
     con.sql(f"""--sql
         COPY (
             SELECT * FROM read_parquet('{sorted_path}')
-        ) TO '{output_path}' (
-            FORMAT parquet,
-            GEOPARQUET_VERSION 'V2',
-            COMPRESSION zstd,
-            ROW_GROUP_SIZE {ROW_GROUP_SIZE}
-        );
+        ) TO '{output_path}' ({TILE_COPY_OPTIONS});
     """)
     pathlib.Path(sorted_path).unlink()
     return output_path
