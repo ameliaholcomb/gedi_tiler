@@ -1,7 +1,8 @@
 """Migrate a tile-year file from layout 3 to 4: gather each profile's
 flattened bin columns (rh_l2a_0 .. rh_l2a_100) into one list column
-(rh_l2a), and rewrite with the current write settings. Rows and all other
-columns are kept as they are, in the same order.
+(rh_l2a), store the unsigned 64-bit columns as signed BIGINT, and rewrite
+with the current write settings. Rows and all other values are kept as
+they are, in the same order.
 
 A one-off: remove once every file is migrated.
 """
@@ -12,6 +13,8 @@ FROM_VERSION = 3
 TO_VERSION = 4
 
 PROFILES = [v for p in SCHEMA.products for v in p.variables if v.is_profile]
+# Layout 3 wrote these as UBIGINT.
+BIGINT_COLUMNS = {"shot_number", "h3_12", "h3_03"}
 
 
 def _bins(profile):
@@ -36,6 +39,8 @@ def rewrite(con, source: str, output: str):
         if c in first_bins:
             p = first_bins[c]
             select.append(f'{_as_list(p)} AS "{p.variable}"')
+        elif c in BIGINT_COLUMNS:
+            select.append(f'"{c}"::BIGINT AS "{c}"')
         elif c not in all_bins:
             select.append(f'"{c}"')
     con.execute("SET preserve_insertion_order = true;")

@@ -13,7 +13,10 @@ class GediProduct(Enum):
 
 # Column types, as numpy dtype names ("str" for fixed-width byte strings),
 # with the pandas dtype that holds them with nulls and the DuckDB type they
-# are written as.
+# are written as. uint64 columns (shot_number and the H3 cells) are written
+# as signed BIGINT: R has no unsigned 64-bit integer, so readers there turn
+# UBIGINT into doubles and round them, while every value fits in a signed
+# one.
 NULLABLE_DTYPES = {
     "bool": "boolean",
     "uint8": "UInt8",
@@ -29,7 +32,7 @@ DUCKDB_TYPES = {
     "uint8": "UTINYINT",
     "uint16": "USMALLINT",
     "int16": "SMALLINT",
-    "uint64": "UBIGINT",
+    "uint64": "BIGINT",
     "float32": "FLOAT",
     "float64": "DOUBLE",
     "str": "VARCHAR",

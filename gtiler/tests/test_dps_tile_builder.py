@@ -279,8 +279,8 @@ class TestRunMain:
         assert types["geometry_6933"] == "GEOMETRY('EPSG:6933')"
         assert types["ease_72km_x"] == "SMALLINT"
         assert types["ease_72km_y"] == "SMALLINT"
-        assert types["h3_12"] == "UBIGINT"
-        assert types["h3_03"] == "UBIGINT"
+        assert types["h3_12"] == "BIGINT"
+        assert types["h3_03"] == "BIGINT"
 
     def test_rows_are_in_hilbert_order(self, run_pipeline):
         tile = Tile(TILE_ID)

@@ -20,7 +20,7 @@ from gtiler.database import ducky
 from gtiler.database.tiles import Tile
 from gtiler.common import s3_utils
 from gtiler.common import checkpoint_lib
-from gtiler.database.schema_v3 import SCHEMA, NULLABLE_DTYPES, TILE_COPY_OPTIONS
+from gtiler.database.schema_v3 import SCHEMA, DUCKDB_TYPES, NULLABLE_DTYPES, TILE_COPY_OPTIONS
 from gtiler.database.schema_v3 import Column, Product, GeometryColumn  # typing only
 
 logger = logging.getLogger(__name__)
@@ -494,8 +494,8 @@ def write_tile(con, parts: List[str], tile: Tile, work_dir: str) -> str:
                 ST_Transform(geometry, 'EPSG:6933') AS geometry_6933,
                 FLOOR((ST_X(geometry_6933) - {EASE_X_ORIGIN}) / ({EASE_X_SCALE * 72}))::SMALLINT AS ease_72km_x,
                 FLOOR(({EASE_Y_ORIGIN} - ST_Y(geometry_6933)) / ({EASE_Y_SCALE * 72}))::SMALLINT AS ease_72km_y,
-                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 12) AS h3_12,
-                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3) AS h3_03
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 12)::{DUCKDB_TYPES["uint64"]} AS h3_12,
+                h3_latlng_to_cell(lat_lowestmode, lon_lowestmode, 3)::{DUCKDB_TYPES["uint64"]} AS h3_03
             FROM read_parquet([{part_list}])
             ORDER BY ST_Hilbert(geometry, {tile_bounds})
         ) TO '{sorted_path}' (

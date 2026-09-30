@@ -51,6 +51,8 @@ def v3_file(con, v4_file, tmp_path):
     for c in columns:
         if c in PROFILES:
             select += [f'"{c}"[{i + 1}] AS "{c}_{i}"' for i in range(PROFILES[c].n_bins)]
+        elif c in migration.BIGINT_COLUMNS:
+            select.append(f'"{c}"::UBIGINT AS "{c}"')
         else:
             select.append(f'"{c}"')
     path = str(tmp_path / "v3.parquet")
