@@ -1,7 +1,10 @@
 import boto3
+from botocore.exceptions import ClientError
 import fsspec
 import logging
 from maap.maap import MAAP
+import requests
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,23 @@ DAAC_CREDENTIALS_ENDPOINTS = {
 }
 
 
+# Waits between attempts at a MAAP API call. Under load the API times out,
+# so calls retry connection failures and timeouts for about 8 minutes.
+MAAP_API_WAITS = (15, 30, 60, 120, 240)
+
+
+def call_maap_api(f, *args, **kwargs):
+    """Call a MAAP API function, retrying connection failures and
+    timeouts with backoff."""
+    for wait in MAAP_API_WAITS:
+        try:
+            return f(*args, **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning("MAAP API call failed, retrying in %ds: %r", wait, e)
+            time.sleep(wait)
+    return f(*args, **kwargs)
+
+
 class DaacFS:
     """S3 filesystems for the DAAC buckets, on temporary Earthdata credentials.
 
@@ -22,7 +42,7 @@ class DaacFS:
     """
 
     def __init__(self):
-        self.maap = MAAP(maap_host="api.maap-project.org")
+        self.maap = call_maap_api(MAAP, maap_host="api.maap-project.org")
         self._fs = {}
 
     def get_fs(self, s3url):
@@ -34,7 +54,7 @@ class DaacFS:
     def refresh(self, s3url):
         bucket = _bucket(s3url)
         endpoint = DAAC_CREDENTIALS_ENDPOINTS[bucket]
-        credentials = self.maap.aws.earthdata_s3_credentials(endpoint)
+        credentials = call_maap_api(self.maap.aws.earthdata_s3_credentials, endpoint)
         self._fs[bucket] = fsspec.filesystem(
             "s3",
             key=credentials["accessKeyId"],
@@ -70,11 +90,34 @@ def s3_prefix_exists(s3_path: str) -> bool:
     return fs.exists(s3_path)
 
 
-def write_empty_file(path: str) -> None:
-    """Create a zero-byte file at path, which may be local or on S3."""
-    fs, p = fsspec.core.url_to_fs(path)
-    fs.makedirs(p.rsplit("/", 1)[0], exist_ok=True)
-    fs.pipe_file(p, b"")
+def object_etag(bucket: str, key: str) -> str:
+    """The object's ETag, or None if it does not exist."""
+    try:
+        return boto3.client("s3").head_object(Bucket=bucket, Key=key)["ETag"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return None
+        raise
+
+
+def conditional_put(
+    bucket: str,
+    key: str,
+    body: bytes,
+    *,
+    if_match: str = None,
+    if_none_match: str = None,
+) -> str:
+    """Write a small object on the same conditions as
+    conditional_multipart_put. Returns the new ETag."""
+    kw = {}
+    if if_match is not None:
+        kw["IfMatch"] = if_match
+    if if_none_match is not None:
+        kw["IfNoneMatch"] = if_none_match
+    return boto3.client("s3").put_object(
+        Bucket=bucket, Key=key, Body=body, **kw
+    )["ETag"]
 
 
 def conditional_multipart_put(

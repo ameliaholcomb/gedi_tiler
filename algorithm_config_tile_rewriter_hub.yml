@@ -1,0 +1,34 @@
+algorithm_description: Rewrite existing GEDI tile-year files with a migration
+algorithm_name: gedi-tile-rewriter
+algorithm_version: deploy-Py3mxn8K
+build_command: gedi_tiler/build/build-env.sh
+disk_space: 20GB
+docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v5.0.0
+inputs:
+  config: []
+  file: []
+  positional:
+  - default: maap-ops-workspace
+    description: AWS bucket in which the GEDI database is stored (e.g. maap-ops-workspace)
+    name: bucket
+    required: true
+    test_value: maap-ops-workspace
+  - default: ''
+    description: AWS S3 prefix in which the GEDI database is stored (e.g. shared/ameliah/tiled_gedi_v3)
+    name: prefix
+    required: true
+    test_value: shared/ameliah/gedi-test/test_v16
+  - default: ''
+    description: Name of the migration module in scripts/tools/migrations/ to apply (e.g.
+      v3_to_v4_profile_lists)
+    name: migration
+    required: true
+    test_value: v3_to_v4_profile_lists
+  - default: ''
+    description: Comma-separated tile_id:year pairs whose files to rewrite (e.g. N02_W050:2023,N02_W050:2024)
+    name: tile_years
+    required: true
+    test_value: S23_W047:2020,N04_W053:2021
+queue: maap-dps-worker-8gb
+repository_url: https://github.com/ameliaholcomb/gedi_tiler.git
+run_command: gedi_tiler/build/run_dps_tile_rewriter.sh
