@@ -300,7 +300,7 @@ def main(args):
         input("To proceed to create jobs, press ENTER >>>")
 
     # 4. Submit jobs for required tile-years not already in the database
-    maap = MAAP()
+    maap = s3_utils.call_maap_api(MAAP)
     # Issue in batches of 50. The pace sets how many jobs run at once,
     # which DAAC S3 read limits cap.
     for i in range(0, len(missing), 50):
@@ -309,7 +309,8 @@ def main(args):
             logger.info("Submitting job for tile %s year %d...", tile_id, year)
             job_name = f"tiler_{args.job_code}_{args.job_iteration}"
             queue = queues[(tile_id, year)]
-            job = maap.submitJob(
+            s3_utils.call_maap_api(
+                maap.submitJob,
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
                 version=args.algo_version,

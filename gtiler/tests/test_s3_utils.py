@@ -62,3 +62,39 @@ def test_refresh_replaces_only_that_daac(daac_fs):
 def test_unknown_bucket_fails(daac_fs):
     with pytest.raises(KeyError):
         daac_fs.get_fs("s3://some-other-bucket/x.h5")
+
+
+class TestCallMaapApi:
+    @pytest.fixture(autouse=True)
+    def no_sleep(self):
+        with patch.object(s3_utils.time, "sleep") as sleep:
+            yield sleep
+
+    def _flaky(self, failures, error):
+        calls = []
+
+        def f(x):
+            calls.append(x)
+            if len(calls) <= failures:
+                raise error
+            return x * 2
+
+        return f, calls
+
+    def test_retries_timeouts_until_success(self, no_sleep):
+        f, calls = self._flaky(2, s3_utils.requests.ConnectTimeout("slow"))
+        assert s3_utils.call_maap_api(f, 3) == 6
+        assert len(calls) == 3
+        assert [c.args[0] for c in no_sleep.call_args_list] == [15, 30]
+
+    def test_raises_once_the_retries_run_out(self):
+        f, calls = self._flaky(99, s3_utils.requests.ConnectionError("down"))
+        with pytest.raises(s3_utils.requests.ConnectionError):
+            s3_utils.call_maap_api(f, 3)
+        assert len(calls) == len(s3_utils.MAAP_API_WAITS) + 1
+
+    def test_other_errors_are_not_retried(self):
+        f, calls = self._flaky(1, ValueError("bad"))
+        with pytest.raises(ValueError):
+            s3_utils.call_maap_api(f, 3)
+        assert len(calls) == 1

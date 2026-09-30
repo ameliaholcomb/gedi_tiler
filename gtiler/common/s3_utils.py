@@ -3,6 +3,8 @@ from botocore.exceptions import ClientError
 import fsspec
 import logging
 from maap.maap import MAAP
+import requests
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,23 @@ DAAC_CREDENTIALS_ENDPOINTS = {
 }
 
 
+# Waits between attempts at a MAAP API call. Under load the API times out,
+# so calls retry connection failures and timeouts for about 8 minutes.
+MAAP_API_WAITS = (15, 30, 60, 120, 240)
+
+
+def call_maap_api(f, *args, **kwargs):
+    """Call a MAAP API function, retrying connection failures and
+    timeouts with backoff."""
+    for wait in MAAP_API_WAITS:
+        try:
+            return f(*args, **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning("MAAP API call failed, retrying in %ds: %r", wait, e)
+            time.sleep(wait)
+    return f(*args, **kwargs)
+
+
 class DaacFS:
     """S3 filesystems for the DAAC buckets, on temporary Earthdata credentials.
 
@@ -23,7 +42,7 @@ class DaacFS:
     """
 
     def __init__(self):
-        self.maap = MAAP(maap_host="api.maap-project.org")
+        self.maap = call_maap_api(MAAP, maap_host="api.maap-project.org")
         self._fs = {}
 
     def get_fs(self, s3url):
@@ -35,7 +54,7 @@ class DaacFS:
     def refresh(self, s3url):
         bucket = _bucket(s3url)
         endpoint = DAAC_CREDENTIALS_ENDPOINTS[bucket]
-        credentials = self.maap.aws.earthdata_s3_credentials(endpoint)
+        credentials = call_maap_api(self.maap.aws.earthdata_s3_credentials, endpoint)
         self._fs[bucket] = fsspec.filesystem(
             "s3",
             key=credentials["accessKeyId"],
