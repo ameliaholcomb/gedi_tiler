@@ -14,4 +14,4 @@ prefix=$2
 migration=$3
 tile_years=$4
 
-conda run --live-stream --name pyduck python ${basedir}/../scripts/dps_tile_rewriter.py --bucket ${bucket} --prefix ${prefix} --migration ${migration} --tile_years ${tile_years}
+conda run --live-stream --name pyduck python ${basedir}/../scripts/dps/dps_tile_rewriter.py --bucket ${bucket} --prefix ${prefix} --migration ${migration} --tile_years ${tile_years}

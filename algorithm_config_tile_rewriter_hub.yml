@@ -1,6 +1,6 @@
 algorithm_description: Rewrite existing GEDI tile-year files with a migration
 algorithm_name: gedi-tile-rewriter
-algorithm_version: main
+algorithm_version: deploy-Py3mxn8K
 build_command: gedi_tiler/build/build-env.sh
 disk_space: 20GB
 docker_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v5.0.0
@@ -19,7 +19,8 @@ inputs:
     required: true
     test_value: shared/ameliah/gedi-test/test_v16
   - default: ''
-    description: Name of the migration module in scripts/migrations/ to apply (e.g. v3_to_v4_profile_lists)
+    description: Name of the migration module in scripts/tools/migrations/ to apply (e.g.
+      v3_to_v4_profile_lists)
     name: migration
     required: true
     test_value: v3_to_v4_profile_lists

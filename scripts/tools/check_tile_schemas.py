@@ -6,7 +6,7 @@ Prints one line per distinct schema, with its file count and an example
 file, and the columns on which the schemas differ.
 
 Usage:
-    python scripts/check_tile_schemas.py --bucket maap-ops-workspace \
+    python scripts/tools/check_tile_schemas.py --bucket maap-ops-workspace \
         --prefix shared/ameliah/tiled_gedi_v3 [--workers 32]
 """
 

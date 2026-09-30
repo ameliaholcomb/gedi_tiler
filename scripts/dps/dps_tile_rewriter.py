@@ -1,6 +1,6 @@
 """Rewrite existing tile-year files with a migration, on DPS.
 
-A migration is a module in scripts/migrations/ with FROM_VERSION,
+A migration is a module in scripts/tools/migrations/ with FROM_VERSION,
 TO_VERSION, rewrite(con, source, output) and check(con, source, output).
 For each tile-year, this downloads the file, and if its recorded layout
 version is FROM_VERSION, rewrites it, checks the result, and uploads it
@@ -8,7 +8,7 @@ on condition the original is unchanged. Files already at TO_VERSION are
 skipped, so a failed job can simply be run again.
 
 Usage:
-    python scripts/dps_tile_rewriter.py --bucket maap-ops-workspace \
+    python scripts/dps/dps_tile_rewriter.py --bucket maap-ops-workspace \
         --prefix shared/ameliah/tiled_gedi_v3 \
         --migration v3_to_v4_profile_lists \
         --tile_years N02_W050:2023,N02_W050:2024
@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import importlib
+import pathlib
 import logging
 import os
 import shutil
@@ -32,6 +33,9 @@ from gtiler.database import ducky
 from gtiler.database.schema_v3 import SCHEMA_VERSION, file_version
 
 logger = logging.getLogger(__name__)
+
+# Migrations live in scripts/tools/migrations/.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 
 # The same budget as the tile builder's final write.
 DUCKDB_MEMORY_LIMIT = "4GB"
@@ -108,7 +112,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--bucket", required=True)
     p.add_argument("--prefix", required=True)
-    p.add_argument("--migration", required=True, help="Module name in scripts/migrations/.")
+    p.add_argument("--migration", required=True, help="Module name in scripts/tools/migrations/.")
     p.add_argument(
         "--tile_years",
         required=True,

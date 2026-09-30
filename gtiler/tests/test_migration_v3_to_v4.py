@@ -1,4 +1,4 @@
-"""Tests for scripts/migrations/v3_to_v4_profile_lists.py: a layout 3 file,
+"""Tests for scripts/tools/migrations/v3_to_v4_profile_lists.py: a layout 3 file,
 migrated, is the file the builder writes today.
 
 Layout 3 files are made from the builder's output by flattening each
@@ -24,7 +24,7 @@ from test_dps_tile_builder import (  # noqa: F401  (fixtures)
     run_pipeline_factory,
 )
 
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "tools"))
 from migrations import v3_to_v4_profile_lists as migration  # noqa: E402
 
 PROFILES = {v.variable: v for p in SCHEMA.products for v in p.variables if v.is_profile}

@@ -8,7 +8,7 @@ patched, and the object is rebuilt on S3 from a server-side copy of its
 data pages and the new footer, on condition the original is unchanged.
 
 Usage:
-    python scripts/fix_predict_stratum.py --bucket maap-ops-workspace \
+    python scripts/tools/fix_predict_stratum.py --bucket maap-ops-workspace \
         --prefix shared/ameliah/tiled_gedi_v3 [--workers 32] [--dry_run]
 """
 

@@ -1,4 +1,4 @@
-"""Integration tests for scripts/dps_tile_builder.py.
+"""Integration tests for scripts/dps/dps_tile_builder.py.
 
 These tests run the full pipeline locally: real h5py parsing, beam
 iteration, in-tile filtering, per-product joins, derived columns, and
@@ -49,8 +49,8 @@ GRANULE_YEARS = {"O15709_01": 2021, "O20346_01": 2022}
 
 
 def _import_dps_tile_builder():
-    """Load scripts/dps_tile_builder.py as a module (it's not a package)."""
-    path = REPO_ROOT / "scripts" / "dps_tile_builder.py"
+    """Load scripts/dps/dps_tile_builder.py as a module (it's not a package)."""
+    path = REPO_ROOT / "scripts" / "dps" / "dps_tile_builder.py"
     spec = importlib.util.spec_from_file_location("dps_tile_builder", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["dps_tile_builder"] = module

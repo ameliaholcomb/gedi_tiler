@@ -7,7 +7,7 @@ are at TO_VERSION and are left out. Before submitting, aborts any upload
 under data/ left unfinished by a rewrite killed a day or more ago.
 
 Usage:
-    python scripts/rewrite_runner.py --bucket maap-ops-workspace \
+    python scripts/runners/rewrite_runner.py --bucket maap-ops-workspace \
         --prefix shared/ameliah/tiled_gedi_v3 \
         --migration v3_to_v4_profile_lists --algo_version deploy-XXXXXXXX \
         --job_code brazil_v4 -i 1 --submit_interval 2 [--dry_run]
@@ -17,6 +17,7 @@ import argparse
 import collections
 import datetime
 import importlib
+import pathlib
 import logging
 import re
 import sys
@@ -32,6 +33,9 @@ from gtiler.common import s3_utils
 from gtiler.database.schema_v3 import file_version
 
 logger = logging.getLogger(__name__)
+
+# Migrations live in scripts/tools/migrations/.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 
 DATA_KEY = re.compile(r"/data/tile_id=([^/]+)/year=(\d+)/data_0\.parquet$")
 
@@ -126,7 +130,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--bucket", required=True)
     p.add_argument("--prefix", required=True)
-    p.add_argument("--migration", required=True, help="Module name in scripts/migrations/.")
+    p.add_argument("--migration", required=True, help="Module name in scripts/tools/migrations/.")
     p.add_argument("--algo_version", required=True, help="Registered gedi-tile-rewriter version.")
     p.add_argument("--job_code", required=True, help="Tag shared by this run's jobs.")
     p.add_argument("--job_iteration", "-i", type=int, required=True)

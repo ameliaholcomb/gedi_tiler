@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 def main(args):
     # 1. Create a new database containing only updated years
     # TODO: Could do some validation checks here.
-    command = f"""python3 scripts/tile_runner.py --job_code {args.prefix.split("/")[-1]}_updates --job_iteration 1 --bucket {args.bucket} --prefix {args.prefix}_updates --shapefile {args.shapefile} --start_year {args.start_year} --end_year {args.end_year} --fast_scan"""
+    command = f"""python3 scripts/runners/tile_runner.py --job_code {args.prefix.split("/")[-1]}_updates --job_iteration 1 --bucket {args.bucket} --prefix {args.prefix}_updates --shapefile {args.shapefile} --start_year {args.start_year} --end_year {args.end_year} --fast_scan"""
     logger.info("Create an updates table using the following command:")
     logger.info("%s", command)
     input("When these jobs have completed, press ENTER to continue >>>")

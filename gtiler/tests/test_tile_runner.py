@@ -1,4 +1,4 @@
-"""Unit tests for the job planning helpers in scripts/tile_runner.py.
+"""Unit tests for the job planning helpers in scripts/runners/tile_runner.py.
 
 Run with:
     conda run -n pyduck python -m pytest gtiler/tests/test_tile_runner.py -v
@@ -16,7 +16,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 @pytest.fixture(scope="module")
 def tile_runner():
-    path = REPO_ROOT / "scripts" / "tile_runner.py"
+    path = REPO_ROOT / "scripts" / "runners" / "tile_runner.py"
     spec = importlib.util.spec_from_file_location("tile_runner", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["tile_runner"] = module
