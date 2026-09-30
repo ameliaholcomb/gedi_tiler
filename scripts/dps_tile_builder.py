@@ -8,6 +8,7 @@ import os
 import pandas as pd
 import pathlib
 import psutil
+import subprocess
 import sys
 import tempfile
 from typing import List, Tuple
@@ -536,6 +537,8 @@ def run_main(args: argparse.Namespace):
 
 def build_tile(args: argparse.Namespace, work_dir: str):
     t1 = time.time()
+    commit = subprocess.check_output(["git", "-C", os.path.dirname(__file__), "rev-parse", "HEAD"], text=True)
+    logger.info("Running commit %s", commit.strip())
 
     con = ducky.init_duckdb(temp_dir=os.path.join(work_dir, "duckdb"))
     con.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}';")
