@@ -9,7 +9,7 @@ under data/ left unfinished by a rewrite killed a day or more ago.
 Usage:
     python scripts/runners/rewrite_runner.py --bucket maap-ops-workspace \
         --prefix shared/ameliah/tiled_gedi_v3 \
-        --migration v3_to_v4_profile_lists --algo_version deploy-XXXXXXXX \
+        --migration <module> --algo_version deploy-XXXXXXXX \
         --job_code brazil_v4 -i 1 --submit_interval 2 [--dry_run]
 """
 
