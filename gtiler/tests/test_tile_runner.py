@@ -24,18 +24,6 @@ def tile_runner():
     return module
 
 
-class TestChooseQueue:
-    def test_small_tile_year_stays_on_8gb(self, tile_runner):
-        assert tile_runner.choose_queue("S03_W060", 54, 55) == "maap-dps-worker-8gb"
-
-    def test_large_tile_year_goes_to_16gb(self, tile_runner):
-        assert tile_runner.choose_queue("S03_W060", 55, 55) == "maap-dps-worker-16gb"
-
-    def test_latitude_queue_is_not_lowered(self, tile_runner):
-        assert tile_runner.choose_queue("N52_W100", 10, 55) == "maap-dps-worker-32gb"
-        assert tile_runner.choose_queue("N52_W100", 90, 55) == "maap-dps-worker-32gb"
-
-
 class TestRequiredTileYears:
     def test_counts_granules_per_tile_year(self, tile_runner):
         granules = pd.DataFrame({

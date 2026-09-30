@@ -48,36 +48,6 @@ def parse_required_products(raw: str) -> list:
             seen.append(p)
     return seen
 
-def get_queue(tile_id):
-    if (("N47" in tile_id) |
-        ("S47" in tile_id) |
-        ("N48" in tile_id) |
-        ("S48" in tile_id) |
-        ("N49" in tile_id) |
-        ("S49" in tile_id) |
-        ("N50" in tile_id) | 
-        ("S50" in tile_id) |
-        ("N51" in tile_id) |
-        ("S51" in tile_id)):
-        return "maap-dps-worker-16gb"
-    if (("N52" in tile_id) |
-        ("S52" in tile_id)):
-        return "maap-dps-worker-32gb"
-    else:
-        return "maap-dps-worker-8gb"
-
-
-def choose_queue(tile_id, n_granules, large_tile_granules):
-    """The latitude band's queue, raised to 16 GB for tile-years with at
-    least large_tile_granules granules. Shots, and so memory, scale with
-    granule count; in the first Brazil run every job killed for memory on
-    8 GB had 55 or more."""
-    queue = get_queue(tile_id)
-    if n_granules >= large_tile_granules and queue == "maap-dps-worker-8gb":
-        return "maap-dps-worker-16gb"
-    return queue
-
-
 def _tile_year(path):
     """Pull the (tile_id, year) pair out of a partitioned data path."""
     parts = dict(p.split("=", 1) for p in path.split("/") if "=" in p)
@@ -258,13 +228,7 @@ def main(args):
     logger.info("Planning to add metadata for %d new tiles.", len(required_tiles) - len(relevant_md_tiles))
     logger.info("(Which should match this number: %d)", tile_granule_gdf.tile_id.nunique())
     logger.info("Planning to create jobs to process data for %d tile-years.", len(missing))
-    queues = {
-        ty: args.queue
-        or choose_queue(ty[0], required[ty], args.large_tile_granules)
-        for ty in missing
-    }
-    for queue, n in sorted(collections.Counter(queues.values()).items()):
-        logger.info("%d jobs will go to %s.", n, queue)
+    logger.info("All jobs will go to %s.", args.queue)
 
     if args.dry_run:
         return
@@ -308,13 +272,12 @@ def main(args):
         for tile_id, year in batch:
             logger.info("Submitting job for tile %s year %d...", tile_id, year)
             job_name = f"tiler_{args.job_code}_{args.job_iteration}"
-            queue = queues[(tile_id, year)]
             s3_utils.call_maap_api(
                 maap.submitJob,
                 identifier=job_name,
                 algo_id="gedi-tile-writer",
                 version=args.algo_version,
-                queue=queue,
+                queue=args.queue,
                 bucket=args.bucket,
                 prefix=args.prefix,
                 tile_id=tile_id,
@@ -375,19 +338,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--queue",
         type=str,
+        default="maap-dps-worker-8gb",
         help=(
-            "DPS queue for every job, e.g. maap-dps-worker-16gb to rerun "
-            "failures. Defaults to a choice by latitude and granule count "
-            "(see --large_tile_granules)."
-        ),
-    )
-    parser.add_argument(
-        "--large_tile_granules",
-        type=int,
-        default=55,
-        help=(
-            "Tile-years with at least this many granules go to the 16 GB "
-            "queue (unless their latitude already calls for more)."
+            "DPS queue for every job. Memory doesn't grow with tile size, "
+            "since only one checkpoint batch is held at a time; use "
+            "maap-dps-worker-16gb, with a higher --job_iteration, to rerun "
+            "jobs that ran out of memory."
         ),
     )
     parser.add_argument(
