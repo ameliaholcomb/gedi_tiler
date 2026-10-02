@@ -17,7 +17,7 @@ inputs:
     description: AWS S3 prefix in which the GEDI database is stored (e.g. shared/ameliah/tiled_gedi_v3)
     name: prefix
     required: true
-    test_value: shared/ameliah/gedi-test/test_v16
+    test_value: shared/ameliah/gedi-test/test_v17_migrate
   - default: ''
     description: Name of the migration module in scripts/tools/migrations/ to apply (e.g.
       v3_to_v4_profile_lists)
@@ -28,7 +28,7 @@ inputs:
     description: Comma-separated tile_id:year pairs whose files to rewrite (e.g. N02_W050:2023,N02_W050:2024)
     name: tile_years
     required: true
-    test_value: S23_W047:2020,N04_W053:2021
+    test_value: N02_W050:2023
 queue: maap-dps-worker-8gb
 repository_url: https://github.com/ameliaholcomb/gedi_tiler.git
 run_command: gedi_tiler/build/run_dps_tile_rewriter.sh

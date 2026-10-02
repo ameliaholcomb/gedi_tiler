@@ -17,19 +17,19 @@ inputs:
     description: AWS S3 prefix in which the GEDI database is stored (e.g. shared/ameliah/gedi_tiles)
     name: prefix
     required: true
-    test_value: shared/ameliah/gedi-test/test_v16
+    test_value: shared/ameliah/gedi-test/test_v17_build
   - default: ''
     description: Tile ID to process. 1x1 degree tiles in the format [N/S][DD][E/W][DDD],
       defining the coordinates of the top-left corner of the tile.
     name: tile_id
     required: true
-    test_value: S23_W047
+    test_value: N02_W050
   - default: ''
     description: Year to process. Only footprints acquired in this year are written,
       even when a granule spans New Year.
     name: year
     required: true
-    test_value: '2020'
+    test_value: '2023'
   - default: '0'
     description: Generation number for this job. Used for optimistic concurrency control
       of checkpoints. Increment this number to start a new generation of checkpoints,

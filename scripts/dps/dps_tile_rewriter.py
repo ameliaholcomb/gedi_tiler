@@ -10,7 +10,7 @@ skipped, so a failed job can simply be run again.
 Usage:
     python scripts/dps/dps_tile_rewriter.py --bucket maap-ops-workspace \
         --prefix shared/ameliah/tiled_gedi_v3 \
-        --migration v3_to_v4_profile_lists \
+        --migration <module in scripts/tools/migrations/> \
         --tile_years N02_W050:2023,N02_W050:2024
 """
 
