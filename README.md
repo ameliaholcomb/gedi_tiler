@@ -8,7 +8,7 @@ git clone git@github.com:ameliaholcomb/gedi_tiler.git
 cd gedi_tiler
 conda env update -f environment.yml
 ```
-Then you're ready check out the examples and tutorial in `tiling_demo.ipynb`!
+Then you're ready check out the examples and tutorial in `demos/quickstart.ipynb`!
 
 ### Reading the GEDI V3 database
 
@@ -58,10 +58,7 @@ s3://{BUCKET}/{PREFIX}/ - data/
 
 Note that you may need to re-run the tile_runner script multiple times on the same region to process all of the tiles, to account for DPS job failures.
 It is safe to re-run this script as many times as you need until it reports that no new tiles need to be added to the database.
-
-Rerunning the script _while tile creation jobs are still running_ submits duplicate jobs for their tile-years. This is safe but wasteful: jobs claim a tile-year's checkpoint manifest with conditional S3 writes, the newest claim wins, and the others stop without writing output.
-To check if there are jobs still running, search for DPS jobs matching the `job_code` string passed to the script using the dps-job-management view.
-Tile creation jobs checkpoint throughout, and a job for the same tile-year resumes from the checkpoint, so they can be cancelled without losing much work.
+Tile creation jobs checkpoint throughout and can be cancelled without losing too much work.
 
 ## Managing a tiled database
 
