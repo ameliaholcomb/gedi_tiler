@@ -1,4 +1,6 @@
 import boto3
+import os
+import tempfile
 from typing import List
 import duckdb
 import geopandas as gpd
@@ -99,12 +101,57 @@ def brazil_data_spec():
     return data_spec(BUCKET, PREFIX)
 
 
-def attach_ducklake(con, bucket, prefix, name="gedi_dl"):
-    ducklake_path = f"s3://{bucket}/{prefix}/ducklake/gedi.ducklake"
+def attach_ducklake(
+    con, bucket, prefix, name="gedi_dl", ducklake_file="gedi.ducklake"
+):
+    """Attach the DuckLake catalog read-only and define the spatial macros.
+
+    The catalog is copied to local disk first: DuckDB reading it in place
+    on S3 adds ~20 s to the first query of every session, while the copy
+    takes a couple of seconds.
+    """
+    local_dir = os.path.join(tempfile.gettempdir(), "gtiler", bucket, prefix)
+    os.makedirs(local_dir, exist_ok=True)
+    local_path = os.path.join(local_dir, ducklake_file)
+    boto3.client("s3").download_file(
+        bucket, f"{prefix}/ducklake/{ducklake_file}", local_path
+    )
     con.sql(f"""--sql
-            ATTACH 'ducklake:{ducklake_path}' AS {name} (READ_ONLY);
+            ATTACH 'ducklake:{local_path}' AS {name} (READ_ONLY);
             USE {name};
     """)
+    create_spatial_macros(con, f"{name}.data")
+
+
+def create_spatial_macros(con, table):
+    """Define table macros selecting the footprints in a region of `table`.
+
+        SELECT * FROM gedi_bbox(xmin, ymin, xmax, ymax)
+        SELECT * FROM gedi_within(geom)
+
+    Both filter on lat/lon ranges, which the DuckLake catalog uses to skip
+    files; a bare ST_Intersects would open every file in the database.
+    """
+    con.sql(f"""--sql
+            CREATE OR REPLACE TEMP MACRO gedi_bbox(xmin, ymin, xmax, ymax) AS TABLE
+            SELECT * FROM {table}
+            WHERE lon_lowestmode BETWEEN xmin AND xmax
+                AND lat_lowestmode BETWEEN ymin AND ymax;
+
+            CREATE OR REPLACE TEMP MACRO gedi_within(geom) AS TABLE
+            SELECT *
+            FROM gedi_bbox(ST_XMin(geom), ST_YMin(geom), ST_XMax(geom), ST_YMax(geom))
+            WHERE ST_Intersects(geometry, geom);
+    """)
+
+
+def set_region(con, gdf: gpd.GeoDataFrame, name: str = "region"):
+    """Store the union of a GeoDataFrame's shapes as a SQL variable,
+    for use as e.g. `gedi_within(getvariable('region'))`."""
+    con.execute(
+        f"SET VARIABLE {name} = ST_GeomFromWKB($1)",
+        [gdf.to_crs("EPSG:4326").union_all().wkb],
+    )
 
 
 def data_prefix(bucket, prefix):
