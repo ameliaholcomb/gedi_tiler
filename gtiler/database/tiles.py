@@ -55,10 +55,11 @@ def get_covering_tiles_for_region(
     Returns:
         tuple of (dataframe of tiles, total geometry of covering region)
     """
-    # generate all the tiles in the world
+    # generate all the tiles in the world, by upper-left corner;
+    # the range ends are exclusive.
     minx = -180
-    maxx = 179
-    miny = -89
+    maxx = 180
+    miny = -90
     maxy = 90
     tiles = []
     for i in range(minx, maxx):
