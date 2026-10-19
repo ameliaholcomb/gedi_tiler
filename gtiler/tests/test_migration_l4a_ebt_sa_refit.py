@@ -97,6 +97,28 @@ def test_pending_only_in_south_america(source):
     assert not migration.pending("N50_E010", source)
 
 
+def test_rewrite_handles_low_predictors_and_groups_without_shots(con, source, tmp_path):
+    # Predictors low enough that the upper bound is negative, as for some
+    # bare-ground shots, and no shot with a1 predictors.
+    low = str(tmp_path / "low.parquet")
+    con.sql(f"""
+        COPY (
+            SELECT * EXCLUDE (file_row_number) REPLACE (
+                CASE WHEN file_row_number = 0 THEN [8.2, 10.0, 0, 0]::FLOAT[] ELSE xvar_l4a END AS xvar_l4a,
+                [-9999, -9999, -9999, -9999]::FLOAT[] AS agbd_prediction_xvar_a1_l4a
+            )
+            FROM read_parquet('{source}', file_row_number = true, hive_partitioning = false)
+        ) TO '{low}' ({migration.TILE_FORMAT_OPTIONS})
+    """)
+    migrated = str(tmp_path / "migrated.parquet")
+    migration.rewrite(con, low, migrated)
+    migration.check(con, low, migrated)
+    (agbd, lower, upper) = con.sql(f"""
+        SELECT agbd_l4a, agbd_pi_lower_l4a, agbd_pi_upper_l4a FROM '{migrated}' LIMIT 1
+    """).fetchone()
+    assert (agbd, lower, upper) == (0, -9999, -9999)
+
+
 @pytest.mark.parametrize(
     "column, changed, where",
     [

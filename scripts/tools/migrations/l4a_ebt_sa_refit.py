@@ -15,17 +15,19 @@ for each algorithm setting group's (xvar_a1 .. xvar_a10):
     agbd_se = c * agbd_t_se^2
     agbd_pi_lower = c * (agbd_t - z * agbd_t_se)^2, or -9999 where that
         bound is negative
-    agbd_pi_upper = c * (agbd_t + z * agbd_t_se)^2
+    agbd_pi_upper = c * (agbd_t + z * agbd_t_se)^2, or -9999 where that
+        bound is negative
     response_limit_flag = 2 where agbd > 1.2 * response_max_value, else 0
     predictor_limit_flag = 2 where any x_i > 1.2 * predictor_max_value_i,
         else 0
 
 with c the Snowdon bias correction and z = qt(0.95, dof). With the old
 model's values from the granules' ANCILLARY/model_data, these reproduce
-the V003 values. Setting agbd to 0 where agbd_t < 0 follows the V003
-granules; the notebook squares it instead. Shots without predictors
-(-9999) keep their no-data values. All other columns, rows and their
-order are unchanged.
+the V003 values. Setting agbd to 0 where agbd_t < 0 follows the V002
+and V003 granules, and agbd_pi_upper to -9999 where its bound is
+negative follows V002 (no V003 shot has one); the notebook squares
+agbd_t instead. Shots without predictors (-9999) keep their no-data
+values. All other columns, rows and their order are unchanged.
 
 Rewritten files record MARKER_KEY in their footer. A one-off: remove once
 every file is rewritten.
@@ -57,6 +59,7 @@ Z = 1.6452909803940292
 # The limit flags mark values beyond 1.2 times the training maxima.
 LIMIT = 1.2
 NODATA = -9999
+XVAR_BINS = 4
 
 MARKER_KEY = "gtiler_l4a_ebt_sa_refit"
 MARKER_VALUE = "20260722"
@@ -124,8 +127,7 @@ def _predictions(group):
         "agbd_t_se": f"{se}::FLOAT",
         "agbd_se": f"({BIAS_CORRECTION} * {se} * {se})::FLOAT",
         "agbd_pi_lower": f"(CASE WHEN {lower} < 0 THEN {NODATA} ELSE {BIAS_CORRECTION} * {lower} * {lower} END)::FLOAT",
-        "agbd_pi_upper": f"(CASE WHEN {upper} < 0 THEN error('negative agbd_pi_upper') "
-        f"ELSE {BIAS_CORRECTION} * {upper} * {upper} END)::FLOAT",
+        "agbd_pi_upper": f"(CASE WHEN {upper} < 0 THEN {NODATA} ELSE {BIAS_CORRECTION} * {upper} * {upper} END)::FLOAT",
         "response_limit_flag": f"(CASE WHEN {agbd} > {LIMIT * RESPONSE_MAX} THEN 2 ELSE 0 END)::UTINYINT",
         "predictor_limit_flag": f"(CASE WHEN {x}[1] > {LIMIT * PREDICTOR_MAX[0]} "
         f"OR {x}[2] > {LIMIT * PREDICTOR_MAX[1]} THEN 2 ELSE 0 END)::UTINYINT",
@@ -176,7 +178,7 @@ def _expected(x):
         "agbd_t_se": se.astype(np.float32),
         "agbd_se": (BIAS_CORRECTION * se**2).astype(np.float32),
         "agbd_pi_lower": np.where(lower < 0, NODATA, BIAS_CORRECTION * lower**2).astype(np.float32),
-        "agbd_pi_upper": (BIAS_CORRECTION * upper**2).astype(np.float32),
+        "agbd_pi_upper": np.where(upper < 0, NODATA, BIAS_CORRECTION * upper**2).astype(np.float32),
         "response_limit_flag": np.where(agbd > LIMIT * RESPONSE_MAX, 2, 0).astype(np.uint8),
         "predictor_limit_flag": np.where((x > LIMIT * np.array(PREDICTOR_MAX)).any(axis=1), 2, 0).astype(np.uint8),
     }
@@ -218,7 +220,7 @@ def check(con, source: str, output: str):
             FROM (SELECT * FROM {src}) s POSITIONAL JOIN (SELECT * FROM {out}) o
             WHERE {_affected(g, "s.")}
         """).to_arrow_table()
-        xs = pc.list_flatten(rows["x"]).to_numpy().reshape(len(rows), -1)[:, :2].astype(np.float64)
+        xs = pc.list_flatten(rows["x"]).to_numpy().reshape(-1, XVAR_BINS)[:, :2].astype(np.float64)
         for n, expected in _expected(xs).items():
             written = rows[_column(n, g)].to_numpy()
             if n.endswith("_flag"):
