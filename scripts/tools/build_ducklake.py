@@ -9,6 +9,7 @@ import tqdm
 from gtiler.database import ducky
 
 DUCKLAKE_FILE = "gedi.ducklake"
+NEVER_NAN_COLUMNS = ["lat_lowestmode", "lon_lowestmode"]
 
 
 def get_cmd_args():
@@ -66,6 +67,25 @@ def load_registered_files(con) -> set[str]:
         "SELECT DISTINCT path FROM __ducklake_metadata_gedi_dl.ducklake_data_file"
     ).fetchall()
     return {row[0] for row in rows}
+
+
+def mark_never_nan(con) -> None:
+    """Record that the shot location columns never contain NaN.
+
+    ducklake_add_data_files leaves contains_nan unknown, and DuckLake will
+    not prune files on min/max stats of a float column unless it knows the
+    column has no NaNs. Lat/lon are always valid, so this lets bounding-box
+    filters on them skip files from the catalog alone.
+    """
+    con.sql(f"""--sql
+            UPDATE __ducklake_metadata_gedi_dl.ducklake_file_column_stats
+            SET contains_nan = false
+            WHERE contains_nan IS NULL AND column_id IN (
+                SELECT column_id
+                FROM __ducklake_metadata_gedi_dl.ducklake_column
+                WHERE column_name IN ({", ".join(f"'{c}'" for c in NEVER_NAN_COLUMNS)})
+            );
+    """)
 
 
 def download_checkpoint(s3, bucket: str, prefix: str) -> bool:
@@ -135,6 +155,7 @@ def main():
             # fmt:off
             con.execute(f"CALL ducklake_add_data_files('gedi_dl', 'data', '{file}', ignore_extra_columns => true);")
             # fmt:on
+        mark_never_nan(con)
         con.close()
         upload_checkpoint(s3, args.bucket, args.prefix)
         processed += len(batch)
