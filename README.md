@@ -64,8 +64,8 @@ Tile creation jobs checkpoint throughout and can be cancelled without losing too
 
 To remove a tile from the database, delete the folder `tile_id=...` from ALL OF the `data/`, `metadata/`, and (if applicable) `checkpoints/` subfolders.
 
-To change the files already in a database (e.g. a new column type), write a migration in `scripts/tools/migrations/`: a module with `FROM_VERSION`, `TO_VERSION`, and `rewrite(con, source, output)` and `check(con, source, output)` functions, where the versions are the file layout versions recorded in each file's footer (`SCHEMA_VERSION` in `gtiler/database/schema_v3.py`). Then run it on DPS with
+To change the files already in a database (e.g. a new column type, or corrected values), write a migration in `scripts/tools/migrations/`: a module with `pending(tile_id, path, filesystem=None)`, `rewrite(con, source, output)` and `check(con, source, output)` functions, where `pending` says from a file (typically its footer) whether it still needs the migration, and `rewrite` writes a file it is no longer pending for (e.g. by recording a new layout version, `SCHEMA_VERSION` in `gtiler/database/schema_v3.py`, or a key of its own). Then run it on DPS with
 ```bash
 python scripts/runners/rewrite_runner.py --bucket <AWS BUCKET> --prefix <PATH/TO/DATABASE> --migration <MODULE NAME> --algo_version <gedi-tile-rewriter VERSION> --job_code <DPS JOB NAME> -i 1 --submit_interval 1
 ```
-Each file is replaced only after its check passes, and only if it hasn't changed since it was read. Files already at `TO_VERSION` are skipped, so rerun the runner until it plans no jobs. Remove the migration once every file is migrated.
+Each file is replaced only after its check passes, and only if it hasn't changed since it was read. Files no longer pending are skipped, so rerun the runner until it plans no jobs. Remove the migration once every file is migrated.

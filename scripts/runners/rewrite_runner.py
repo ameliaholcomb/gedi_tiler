@@ -1,20 +1,19 @@
 """Submit DPS jobs rewriting every tile-year file that a migration applies to.
 
-Reads each data file's footer for its recorded layout version, and sends
-the files at the migration's FROM_VERSION to gedi-tile-rewriter jobs, a
-few files per job. Run it again after jobs fail: files already rewritten
-are at TO_VERSION and are left out. Before submitting, aborts any upload
-under data/ left unfinished by a rewrite killed a day or more ago.
+Asks the migration which data files it is pending for, and sends those
+to gedi-tile-rewriter jobs, a few files per job. Run it again after jobs
+fail: files already rewritten are no longer pending and are left out.
+Before submitting, aborts any upload under data/ left unfinished by a
+rewrite killed a day or more ago.
 
 Usage:
     python scripts/runners/rewrite_runner.py --bucket maap-ops-workspace \
         --prefix shared/ameliah/tiled_gedi_v3 \
         --migration <module> --algo_version deploy-XXXXXXXX \
-        --job_code brazil_v4 -i 1 --submit_interval 2 [--dry_run]
+        --job_code <job code> -i 1 --submit_interval 2 [--dry_run]
 """
 
 import argparse
-import collections
 import datetime
 import importlib
 import pathlib
@@ -26,11 +25,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import pyarrow.fs
-import pyarrow.parquet as pq
 from maap.maap import MAAP
 
 from gtiler.common import s3_utils
-from gtiler.database.schema_v3 import file_version
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +49,16 @@ def data_files(bucket, prefix):
     return files
 
 
-def versions(bucket, files, workers=32):
-    """The layout version each file records, read from its footer."""
+def pending(migration, bucket, files, workers=32):
+    """The (tile_id, year) of each file the migration is pending for."""
     fs = pyarrow.fs.S3FileSystem(region="us-west-2")
 
-    def version(key):
-        return file_version(pq.read_metadata(f"{bucket}/{key}", filesystem=fs).metadata)
+    def is_pending(item):
+        (tile_id, _), key = item
+        return migration.pending(tile_id, f"{bucket}/{key}", fs)
 
     with ThreadPoolExecutor(workers) as ex:
-        return dict(zip(files, ex.map(version, files.values())))
+        return [ty for ty, p in zip(files, ex.map(is_pending, files.items())) if p]
 
 
 def abort_stale_uploads(bucket, prefix, older_than=datetime.timedelta(days=1)):
@@ -79,17 +77,8 @@ def abort_stale_uploads(bucket, prefix, older_than=datetime.timedelta(days=1)):
 def main(args):
     migration = importlib.import_module(f"migrations.{args.migration}")
     files = data_files(args.bucket, args.prefix)
-    logger.info("Reading the layout version of %d files ...", len(files))
-    found = versions(args.bucket, files)
-    counts = collections.Counter(found.values())
-    logger.info("Files by version: %s", dict(sorted(counts.items())))
-    unexpected = set(counts) - {migration.FROM_VERSION, migration.TO_VERSION}
-    if unexpected:
-        raise ValueError(
-            f"Files at versions {unexpected}, which {args.migration} does not "
-            f"migrate from ({migration.FROM_VERSION}) or to ({migration.TO_VERSION})"
-        )
-    todo = sorted(ty for ty, v in found.items() if v == migration.FROM_VERSION)
+    logger.info("Checking which of %d files %s is pending for ...", len(files), args.migration)
+    todo = sorted(pending(migration, args.bucket, files))
     jobs = [todo[i : i + args.files_per_job] for i in range(0, len(todo), args.files_per_job)]
     logger.info(
         "Planning %d jobs for %d files (%d per job) on %s.",

@@ -46,25 +46,21 @@ DUCKDB_TYPES = {
 SCHEMA_VERSION = 4
 VERSION_KEY = "gtiler_schema_version"
 
-
-def file_version(key_value_metadata) -> int:
-    """The layout version a file records, given its parquet key-value
-    metadata (pyarrow's FileMetaData.metadata). Files from before versions
-    were recorded are version 3."""
-    return int((key_value_metadata or {}).get(VERSION_KEY.encode(), b"3"))
-
 # DuckDB COPY options for tile-year files. zstd decompresses at the same
 # speed whatever the level, so a high level costs only write time.
 # PARQUET_VERSION V2 adds encodings (BYTE_STREAM_SPLIT for floats, delta
-# for integers and strings) that shrink the files.
+# for integers and strings) that shrink the files. TILE_FORMAT_OPTIONS
+# leaves out the key-value metadata, for writers that record more keys.
 TILE_ROW_GROUP_SIZE = 200_000
-TILE_COPY_OPTIONS = f"""
+TILE_FORMAT_OPTIONS = f"""
     FORMAT parquet,
     GEOPARQUET_VERSION 'V2',
     PARQUET_VERSION V2,
     COMPRESSION zstd,
     COMPRESSION_LEVEL 9,
-    ROW_GROUP_SIZE {TILE_ROW_GROUP_SIZE},
+    ROW_GROUP_SIZE {TILE_ROW_GROUP_SIZE}
+"""
+TILE_COPY_OPTIONS = f"""{TILE_FORMAT_OPTIONS},
     KV_METADATA {{{VERSION_KEY}: '{SCHEMA_VERSION}'}}
 """
 
