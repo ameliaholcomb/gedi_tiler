@@ -101,9 +101,7 @@ def brazil_data_spec():
     return data_spec(BUCKET, PREFIX)
 
 
-def attach_ducklake(
-    con, bucket, prefix, name="gedi_dl", ducklake_file="gedi.ducklake"
-):
+def attach_ducklake(con, bucket, prefix, name="gedi_dl"):
     """Attach the DuckLake catalog read-only and define the spatial macros.
 
     The catalog is copied to local disk first: DuckDB reading it in place
@@ -112,9 +110,9 @@ def attach_ducklake(
     """
     local_dir = os.path.join(tempfile.gettempdir(), "gtiler", bucket, prefix)
     os.makedirs(local_dir, exist_ok=True)
-    local_path = os.path.join(local_dir, ducklake_file)
+    local_path = os.path.join(local_dir, "gedi.ducklake")
     boto3.client("s3").download_file(
-        bucket, f"{prefix}/ducklake/{ducklake_file}", local_path
+        bucket, f"{prefix}/ducklake/gedi.ducklake", local_path
     )
     con.sql(f"""--sql
             ATTACH 'ducklake:{local_path}' AS {name} (READ_ONLY);

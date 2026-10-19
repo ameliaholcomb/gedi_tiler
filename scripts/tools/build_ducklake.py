@@ -29,22 +29,6 @@ def get_cmd_args():
         help="S3 prefix (folder) where the database is stored",
     )
     p.add_argument(
-        "--ducklake-file",
-        type=str,
-        default=DUCKLAKE_FILE,
-        help="Catalog file name under <prefix>/ducklake/. Use a different "
-        "name for test builds so they do not overwrite the main catalog.",
-    )
-    p.add_argument(
-        "--tile-globs",
-        type=str,
-        nargs="+",
-        default=LATITUDE_BAND_GLOBS,
-        help="Glob patterns over tile ids, registered one batch per pattern. "
-        "Every pattern must match at least one file. Defaults to the whole "
-        "database in 10-degree latitude bands.",
-    )
-    p.add_argument(
         "--threads",
         type=int,
         default=64,
@@ -80,7 +64,7 @@ def main():
 
     data_root = ducky.data_prefix(args.bucket, args.prefix)
     tempdir = f"s3://{args.bucket}/{args.prefix}/temp_duckdb/"
-    for f in [args.ducklake_file, f"{args.ducklake_file}.wal"]:
+    for f in [DUCKLAKE_FILE, f"{DUCKLAKE_FILE}.wal"]:
         if os.path.exists(f):
             os.remove(f)
 
@@ -88,7 +72,7 @@ def main():
     con.execute("SET enable_progress_bar = false;")
     con.execute(f"SET threads = {args.threads};")
     con.sql(f"""--sql
-            ATTACH 'ducklake:{args.ducklake_file}' AS gedi_dl (
+            ATTACH 'ducklake:{DUCKLAKE_FILE}' AS gedi_dl (
             DATA_PATH '{tempdir}');
     """)
 
@@ -105,7 +89,7 @@ def main():
 
     # Register by glob rather than by file list: DuckDB reads the footers of
     # globbed files in parallel, but those of a list one at a time.
-    for tile_glob in tqdm.tqdm(args.tile_globs, desc="Batches"):
+    for tile_glob in tqdm.tqdm(LATITUDE_BAND_GLOBS, desc="Batches"):
         pattern = f"{data_root}tile_id={tile_glob}/year=*/*.parquet"
         # fmt:off
         con.execute(f"CALL ducklake_add_data_files('gedi_dl', 'data', '{pattern}', hive_partitioning => true, ignore_extra_columns => true);")
@@ -118,8 +102,8 @@ def main():
     mark_never_nan(con)
     con.close()
 
-    key = f"{args.prefix}/ducklake/{args.ducklake_file}"
-    boto3.client("s3").upload_file(args.ducklake_file, args.bucket, key)
+    key = f"{args.prefix}/ducklake/{DUCKLAKE_FILE}"
+    boto3.client("s3").upload_file(DUCKLAKE_FILE, args.bucket, key)
     logger.info(f"Uploaded catalog to s3://{args.bucket}/{key}.")
 
 
