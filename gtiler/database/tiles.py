@@ -1,7 +1,9 @@
 import geopandas as gpd
+import math
 import re
+import shapely
 from shapely.geometry import box
-from typing import Tuple
+from typing import List, Tuple
 
 
 class Tile:
@@ -78,3 +80,28 @@ def get_covering_tiles_for_region(
     covering_tiles = covering_tiles[["tile_id", "geometry"]]
     covering = gpd.GeoSeries(covering_tiles.union_all(), crs="EPSG:4326")
     return covering_tiles.reset_index(drop=True), covering
+
+
+def get_covering_tile_ids(shape: gpd.GeoDataFrame) -> List[str]:
+    """IDs of the 1x1 degree tiles that intersect a region in any CRS.
+
+    The tiles are densified and reprojected into the region's CRS, rather
+    than the region into lon/lat, so the region is matched exactly as drawn.
+    """
+    region = shape.union_all()
+    # Candidates: the region's lon/lat bounds, plus a tile on each side. The
+    # region is densified first so that edges curving in lon/lat count.
+    minx, miny, maxx, maxy = region.bounds
+    step = max(maxx - minx, maxy - miny) / 1000
+    dense = shapely.segmentize(region, step) if step > 0 else region
+    lon0, lat0, lon1, lat1 = (
+        gpd.GeoSeries([dense], crs=shape.crs).to_crs("EPSG:4326").total_bounds
+    )
+    lons = range(max(-180, math.floor(lon0) - 1), min(180, math.ceil(lon1) + 1))
+    lats = range(max(-89, math.ceil(lat0) - 1), min(90, math.ceil(lat1) + 1) + 1)
+    ids = [_to_text(x, y) for x in lons for y in lats]
+    boxes = [box(x, y - 1, x + 1, y) for x in lons for y in lats]
+    projected = gpd.GeoSeries(
+        shapely.segmentize(boxes, 0.01), crs="EPSG:4326"
+    ).to_crs(shape.crs)
+    return [i for i, hit in zip(ids, projected.intersects(region)) if hit]
