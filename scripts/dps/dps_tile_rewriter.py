@@ -1,11 +1,11 @@
 """Rewrite existing tile-year files with a migration, on DPS.
 
-A migration is a module in scripts/tools/migrations/ with FROM_VERSION,
-TO_VERSION, rewrite(con, source, output) and check(con, source, output).
-For each tile-year, this downloads the file, and if its recorded layout
-version is FROM_VERSION, rewrites it, checks the result, and uploads it
-on condition the original is unchanged. Files already at TO_VERSION are
-skipped, so a failed job can simply be run again.
+A migration is a module in scripts/tools/migrations/ with
+pending(tile_id, path, filesystem=None), rewrite(con, source, output) and
+check(con, source, output). For each tile-year, this downloads the file,
+and if the migration is pending for it, rewrites it, checks the result,
+and uploads it on condition the original is unchanged. Files no longer
+pending are skipped, so a failed job can simply be run again.
 
 Usage:
     python scripts/dps/dps_tile_rewriter.py --bucket maap-ops-workspace \
@@ -26,11 +26,9 @@ import tempfile
 import time
 
 import boto3
-import pyarrow.parquet as pq
 
 from gtiler.common import s3_utils
 from gtiler.database import ducky
-from gtiler.database.schema_v3 import SCHEMA_VERSION, file_version
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +48,14 @@ def rewrite_tile_year(con, migration, bucket, prefix, tile_id, year, work_dir):
     body = boto3.client("s3").get_object(Bucket=bucket, Key=key, IfMatch=etag)["Body"]
     with open(source, "wb") as f:
         shutil.copyfileobj(body, f, 16 * 2**20)
-    version = file_version(pq.read_metadata(source).metadata)
-    if version == migration.TO_VERSION:
-        logger.info("%s is already version %d.", key, version)
+    if not migration.pending(tile_id, source):
+        logger.info("%s needs no rewrite.", key)
         return "skipped"
-    if version != migration.FROM_VERSION:
-        raise ValueError(f"{key} is version {version}, not {migration.FROM_VERSION}")
     t = time.time()
     migration.rewrite(con, source, output)
     migration.check(con, source, output)
-    written = file_version(pq.read_metadata(output).metadata)
-    if written != migration.TO_VERSION:
-        raise ValueError(f"Rewrite of {key} recorded version {written}")
+    if migration.pending(tile_id, output):
+        raise ValueError(f"The rewrite of {key} is still pending")
     with open(output, "rb") as f:
         s3_utils.conditional_multipart_put(bucket, key, f, if_match=etag)
     logger.info(
@@ -78,11 +72,6 @@ def main(args):
     commit = subprocess.check_output(["git", "-C", os.path.dirname(__file__), "rev-parse", "HEAD"], text=True)
     logger.info("Running commit %s", commit.strip())
     migration = importlib.import_module(f"migrations.{args.migration}")
-    if migration.TO_VERSION != SCHEMA_VERSION:
-        raise ValueError(
-            f"{args.migration} writes version {migration.TO_VERSION}, "
-            f"but the schema is version {SCHEMA_VERSION}"
-        )
     tile_years = [ty.split(":") for ty in args.tile_years.split(",")]
     # Scratch files live under the working directory, outside the DPS
     # output directory.
