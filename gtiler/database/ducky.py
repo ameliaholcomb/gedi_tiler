@@ -130,24 +130,20 @@ def attach_ducklake(con, bucket, prefix, name="gedi_dl"):
 
 
 def create_spatial_macros(con, table):
-    """Define table macros selecting the footprints in a region of `table`.
+    """Define a table macro selecting the footprints in a lon/lat box of
+    `table`:
 
         SELECT * FROM gedi_bbox(xmin, ymin, xmax, ymax)
-        SELECT * FROM gedi_within(geom)
 
-    Both filter on lat/lon ranges, which the DuckLake catalog uses to skip
+    It filters on lat/lon ranges, which the DuckLake catalog uses to skip
     files; a bare ST_Intersects would open every file in the database.
+    For other regions, use set_region.
     """
     con.sql(f"""--sql
             CREATE OR REPLACE TEMP MACRO gedi_bbox(xmin, ymin, xmax, ymax) AS TABLE
             SELECT * FROM {table}
             WHERE lon_lowestmode BETWEEN xmin AND xmax
                 AND lat_lowestmode BETWEEN ymin AND ymax;
-
-            CREATE OR REPLACE TEMP MACRO gedi_within(geom) AS TABLE
-            SELECT *
-            FROM gedi_bbox(ST_XMin(geom), ST_YMin(geom), ST_XMax(geom), ST_YMax(geom))
-            WHERE ST_Intersects(geometry, geom);
     """)
 
 
