@@ -31,9 +31,10 @@ def get_cmd_args():
     p.add_argument(
         "--threads",
         type=int,
-        default=64,
+        default=32,
         help="DuckDB threads. Registration is bound by S3 latency on footer "
-        "reads, so more threads than cores helps.",
+        "reads, so more threads than cores helps, but 64 ran out of memory "
+        "on a 16 GB workspace.",
     )
     return p.parse_args()
 

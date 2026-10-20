@@ -18,17 +18,13 @@ ESA_TESTDB_PATH = "s3://nasa-maap-data-store/file-staging/nasa-map/gedi-tiled-v2
 ESA_TESTDB_MANIFEST_PATH = f"{ESA_TESTDB_PATH}/manifest.txt"
 ESA_TESTDB_ICEBERG_PATH = f"{ESA_TESTDB_PATH}/iceberg/gedi_tiled_v2/metadata/latest.metadata.json"
 
-def init_duckdb(temp_dir: str = None):
-    session = boto3.Session()
-    creds = session.get_credentials().get_frozen_credentials()
-    con = duckdb.connect()
-    # con.execute("SET access_mode = 'READ_ONLY';")
-    con.install_extension("spatial")
-    con.load_extension("spatial")
-    con.install_extension("aws")
-    con.load_extension("aws")
-    con.install_extension("httpfs")
-    con.load_extension("httpfs")
+def refresh_credentials(con):
+    """Give DuckDB the session's current AWS credentials.
+
+    The credentials on the MAAP Hub expire after about an hour, after which
+    reads fail with ExpiredToken; run this again to renew them.
+    """
+    creds = boto3.Session().get_credentials().get_frozen_credentials()
     # Set AWS credentials explicitly; using the credential chain sometimes
     # fetches the incorrect credentials on the MAAP Hub.
     con.execute(f"""
@@ -40,6 +36,18 @@ def init_duckdb(temp_dir: str = None):
             REGION 'us-west-2'
         )
     """)
+
+
+def init_duckdb(temp_dir: str = None):
+    con = duckdb.connect()
+    # con.execute("SET access_mode = 'READ_ONLY';")
+    con.install_extension("spatial")
+    con.load_extension("spatial")
+    con.install_extension("aws")
+    con.load_extension("aws")
+    con.install_extension("httpfs")
+    con.load_extension("httpfs")
+    refresh_credentials(con)
     con.execute("SET enable_progress_bar = true;")
     con.execute("SET preserve_insertion_order = false;")
     con.execute("SET memory_limit = '8GB';")
