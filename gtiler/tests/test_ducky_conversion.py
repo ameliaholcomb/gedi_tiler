@@ -67,6 +67,13 @@ class TestDuckToGdf:
         assert gdf.crs == "EPSG:4326"
         assert gdf["geometry_6933"].crs == "EPSG:6933"
 
+    def test_active_geometry_keeps_its_column_name(self, con):
+        rel = con.sql("SELECT 1 AS id, ST_Point(906000, 101000) AS geometry_6933")
+        gdf = ducky.duck_to_gdf(rel, ["geometry_6933"], crs="EPSG:6933")
+        assert list(gdf.columns) == ["id", "geometry_6933"]
+        assert gdf.geometry.name == "geometry_6933"
+        assert gdf.crs == "EPSG:6933"
+
     def test_plain_geometry_without_crs_is_rejected(self, con):
         rel = con.sql("SELECT ST_Point(1, 2) AS geometry")
         with pytest.raises(ValueError, match="no CRS"):

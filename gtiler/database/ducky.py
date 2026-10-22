@@ -302,18 +302,9 @@ def duck_to_gdf(
         [f"ST_AsHEXWKB({col}) AS {col}" for col in geometry_columns]
     )
     df = table.select(f"* REPLACE ({replace_cols})").to_df()
-    gdf = gpd.GeoDataFrame(
-        df,
-        geometry=gpd.GeoSeries.from_wkb(
-            df[geometry_columns[0]], crs=crs_of[geometry_columns[0]]
-        ),
-    )
-    if len(geometry_columns) > 1:
-        for geom_col in geometry_columns[1:]:
-            gdf[geom_col] = gpd.GeoSeries.from_wkb(
-                df[geom_col], crs=crs_of[geom_col]
-            )
-    return gdf
+    for geom_col in geometry_columns:
+        df[geom_col] = gpd.GeoSeries.from_wkb(df[geom_col], crs=crs_of[geom_col])
+    return gpd.GeoDataFrame(df, geometry=geometry_columns[0])
 
 
 def gdf_to_duck(
